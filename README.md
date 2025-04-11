@@ -1,4 +1,4 @@
-##Explore - Travel Recommendation API
+#Explore - Travel Recommendation API
 <div align="center"> <img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi" alt="FastAPI"/> <img src="https://img.shields.io/badge/MongoDB-4EA94B?style=for-the-badge&logo=mongodb&logoColor=white" alt="MongoDB"/> <img src="https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white" alt="Railway"/> <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"/> </div> <hr style="height:1px;border:none;color:#333;background-color:#333;" />
 📌 Overview
 This API provides sophisticated travel recommendations and roadmap generation using NLP and hybrid filtering algorithms.

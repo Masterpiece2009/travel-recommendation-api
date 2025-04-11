@@ -7,3 +7,5 @@ pydantic<1.11.0,>=1.7.4
 numpy==1.23.5
 # Specify spaCy and the language model
 spacy==3.4.4
+# Add geopy for distance calculations
+geopy>=2.2.0

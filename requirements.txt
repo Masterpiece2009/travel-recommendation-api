@@ -2,6 +2,5 @@ fastapi==0.95.1
 uvicorn==0.22.0
 pymongo==4.3.3
 pydantic==1.10.7
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.4.0/en_core_web_sm-3.4.0-py3-none-any.whl
 scikit-learn==1.2.2
 nest-asyncio==1.5.6

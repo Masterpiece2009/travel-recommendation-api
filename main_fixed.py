@@ -1,27 +1,104 @@
+# --- PART 1: IMPORTS AND CONFIGURATION ---
+
 import os
-import datetime
-import asyncio
+import json
+import logging
+import pymongo
+import urllib.parse
+import spacy
 import math
 import random
-import sys
+import asyncio
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
-
-from fastapi import FastAPI, BackgroundTasks, Query
+from fastapi import FastAPI, Request, Query, BackgroundTasks
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import pymongo
-import spacy
-import nest_asyncio
-import uvicorn
+from pydantic import BaseModel
 from sklearn.preprocessing import MinMaxScaler
+from geopy.distance import geodesic
 
-# Enable nested asyncio for background tasks
-nest_asyncio.apply()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ✅ Securely Connect to MongoDB
+password = os.environ.get("MONGO_PASSWORD", "cmCqBjtQCQDWbvlo")  # Fallback for development
+encoded_password = urllib.parse.quote_plus(password)
+
+MONGO_URI = f"mongodb+srv://shehabwww153:{encoded_password}@userauth.rvtb5.mongodb.net/travel_app?retryWrites=true&w=majority&appName=userAuth"
+
+def connect_mongo(uri, retries=3):
+    """Attempts to connect to MongoDB with retry logic."""
+    for attempt in range(retries):
+        try:
+            client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
+            client.server_info()  # Force connection check
+            logger.info("✅ MongoDB connection established!")
+            return client
+        except Exception as e:
+            logger.error(f"❌ MongoDB connection failed (Attempt {attempt + 1}/{retries}): {e}")
+    raise Exception("❌ MongoDB connection failed after multiple attempts.")
+
+client = connect_mongo(MONGO_URI)
+db = client["travel_app"]
+
+# Define Collections
+users_collection = db["users"]
+places_collection = db["places"]
+interactions_collection = db["interactions"]
+search_queries_collection = db["search_queries"]
+travel_preferences_collection = db["user_travel_preferences"]
+recommendations_cache_collection = db["recommendations_cache"]
+shown_places_collection = db["shown_places"]
+roadmaps_collection = db["roadmaps"]  # New collection for roadmaps
+
+# Create TTL index for roadmaps collection (expires after 24 hours)
+try:
+    roadmaps_collection.create_index(
+        [("created_at", 1)],
+        expireAfterSeconds=86400  # 24 hours
+    )
+    logger.info("Created TTL index on roadmaps collection")
+except Exception as e:
+    logger.error(f"Error creating TTL index on roadmaps collection: {e}")
+
+# --- Initialize spaCy model ---
+def load_spacy_model(model="en_core_web_sm", retries=2):
+    """Attempts to load the spaCy model, downloading it if necessary."""
+    for attempt in range(retries):
+        try:
+            return spacy.load(model)
+        except Exception as e:
+            logger.error(f"❌ Error loading NLP model (Attempt {attempt + 1}/{retries}): {e}")
+            try:
+                spacy.cli.download(model)
+            except Exception as download_err:
+                logger.error(f"Failed to download model: {download_err}")
+    
+    # Return dummy NLP object as fallback
+    class DummyNLP:
+        def __call__(self, text):
+            class DummyDoc:
+                def __init__(self, text):
+                    self.text = text
+                    self.vector = [0] * 300  # Empty vector
+            return DummyDoc(text)
+    
+    logger.warning("Using dummy NLP model as fallback!")
+    return DummyNLP()
+
+nlp = load_spacy_model()
+logger.info("✅ NLP Model Loaded!")
 
 # Initialize FastAPI
-app = FastAPI(title="Travel Recommendation API")
+app = FastAPI(
+    title="Travel API",
+    description="API for travel recommendations and roadmaps",
+    version="1.0.0"
+)
 
-# Add CORS middleware
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,1082 +106,1502 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# --- PART 2: MODELS AND SHARED UTILITY FUNCTIONS ---
 
-# Connect to MongoDB
-mongo_uri = os.environ.get("MONGO_URI")
-mongo_password = os.environ.get("MONGO_PASSWORD")
+# --- Pydantic Models ---
+class RecommendationRequest(BaseModel):
+    user_id: str
+    num_recommendations: Optional[int] = 10
 
-# Replace password placeholder with actual password
-if mongo_uri and mongo_password:
-    mongo_uri = mongo_uri.replace("<db_password>", mongo_password)
-    client = pymongo.MongoClient(mongo_uri)
-    # Use correct database name
-    db = client.travel_app
-else:
-    raise ValueError("MongoDB URI or password not provided in environment variables")
+class RoadmapRequest(BaseModel):
+    user_id: str
 
-# TTL in seconds (6 hours)
-TTL_SECONDS = 6 * 60 * 60
+# --- Shared Utility Functions ---
 
-# ✅ IMPROVED: Initialize all collections with proper TTL indexes
-def initialize_collections():
-    """Set up all collections with proper indexes and TTL configurations"""
-    try:
-        print("Initializing collections and indexes...")
-        
-        # 1. Recommendation Cache Collection
-        cache_collection = db.recommendation_cache
-        # Create index for efficient lookups
-        cache_collection.create_index([
-            ("user_id", pymongo.ASCENDING)
-        ])
-        
-        # Create index for cache expiration (6 hours TTL)
-        cache_collection.create_index([
-            ("timestamp", pymongo.ASCENDING)
-        ], expireAfterSeconds=TTL_SECONDS)
-        
-        # 2. Cache Locks Collection
-        locks_collection = db.cache_locks
-        # Create index for lock expiration (10 minutes TTL)
-        locks_collection.create_index([
-            ("timestamp", pymongo.ASCENDING)
-        ], expireAfterSeconds=600)
-        
-        # 3. User Shown Places Collection
-        shown_places_collection = db.user_shown_places
-        # Create index for user lookup
-        shown_places_collection.create_index([
-            ("user_id", pymongo.ASCENDING)
-        ])
-        
-        # Create index for TTL expiration (6 hours, same as cache)
-        shown_places_collection.create_index([
-            ("timestamp", pymongo.ASCENDING)
-        ], expireAfterSeconds=TTL_SECONDS)
-        
-        print("Collections initialized successfully with TTL indexes")
-        return True
-    except Exception as e:
-        print(f"Error initializing collections: {e}")
-        return False
-
-# Initialize collections on startup
-initialize_collections()
-
-# Load NLP Model with vectors
-try:
-    import spacy
-    try:
-        # Try to load the medium model with vectors
-        nlp = spacy.load("en_core_web_md")
-        print("✅ NLP model with word vectors loaded successfully")
-    except:
-        try:
-            # Fallback to small model
-            nlp = spacy.load("en_core_web_sm")
-            print("⚠️ NLP model without word vectors loaded")
-        except:
-            # Last resort - blank model
-            nlp = spacy.blank("en")
-            print("⚠️ Using blank spaCy model - no vectors available")
-except ImportError:
-    # Create a dummy NLP implementation if spaCy isn't available
-    class DummyNLP:
-        def __call__(self, text):
-            return DummyDoc(text)
-            
-    class DummyDoc:
-        def __init__(self, text):
-            self.text = text
-            
-        def similarity(self, other):
-            # Simple word overlap
-            words1 = set(self.text.lower().split())
-            words2 = set(other.text.lower().split())
-            if not words1 or not words2:
-                return 0.0
-            intersection = len(words1.intersection(words2))
-            union = len(words1.union(words2))
-            return intersection / union if union > 0 else 0.0
-            
-    nlp = DummyNLP()
-    print("⚠️ Using dummy NLP implementation")
-# ✅ Cache Management Functions
-def get_user_cached_recommendations(user_id: str):
-    """Get all cached recommendations for a user, sorted by sequence"""
-    try:
-        cache_entries = list(db.recommendation_cache.find(
-            {"user_id": user_id}
-        ).sort("sequence", 1))
-        return cache_entries
-    except Exception as e:
-        print(f"Error getting user's cached recommendations: {e}")
-        return []
-
-def get_next_sequence(user_id: str):
-    """Get the next sequence number for a user's cache entries"""
-    try:
-        highest_seq = db.recommendation_cache.find_one(
-            {"user_id": user_id},
-            sort=[("sequence", pymongo.DESCENDING)]
-        )
-        
-        if highest_seq and "sequence" in highest_seq:
-            return highest_seq["sequence"] + 1
-        else:
-            return 1  # Start from 1 if no entries exist
-    except Exception as e:
-        print(f"Error getting next sequence number: {e}")
-        return 1  # Default to 1 on error
-
-def count_remaining_cache(user_id: str):
-    """Count how many cache entries remain for a user"""
-    try:
-        count = db.recommendation_cache.count_documents({"user_id": user_id})
-        return count
-    except Exception as e:
-        print(f"Error counting cache entries: {e}")
-        return 0
-
-def store_cache_entry(user_id: str, recommendations: dict, sequence: int):
-    """Store a new cache entry with sequence number"""
-    try:
-        # Add timestamp and sequence number
-        cache_entry = {
-            "user_id": user_id,
-            "recommendations": recommendations,
-            "sequence": sequence,
-            "timestamp": datetime.now()
-        }
-        
-        # Insert cache entry
-        result = db.recommendation_cache.insert_one(cache_entry)
-        print(f"Stored cache entry for user {user_id}, sequence {sequence}")
-        return True
-    except Exception as e:
-        print(f"Error storing cache entry: {e}")
-        return False
-
-def clear_user_cache(user_id: str):
-    """Clear all cache entries for a user"""
-    try:
-        result = db.recommendation_cache.delete_many({"user_id": user_id})
-        print(f"Cleared {result.deleted_count} cache entries for user {user_id}")
-        return result.deleted_count
-    except Exception as e:
-        print(f"Error clearing user cache: {e}")
-        return 0
-
-def acquire_cache_lock(user_id: str):
-    """Try to acquire a lock for cache generation for a user"""
-    try:
-        lock_key = f"generating_{user_id}"
-        existing_lock = db.cache_locks.find_one({"key": lock_key})
-        if existing_lock:
-            return False
-        
-        db.cache_locks.insert_one({
-            "key": lock_key,
-            "timestamp": datetime.now(),
-            "user_id": user_id
-        })
-        return True
-    except Exception as e:
-        print(f"Error acquiring cache lock: {e}")
-        return False
-
-def release_cache_lock(user_id: str):
-    """Release the cache generation lock for a user"""
-    try:
-        lock_key = f"generating_{user_id}"
-        result = db.cache_locks.delete_one({"key": lock_key})
-        return result.deleted_count > 0
-    except Exception as e:
-        print(f"Error releasing cache lock: {e}")
-        return False
-
-# ✅ User Data Functions
-def get_user_data(user_id):
-    """Get user data including preferences and history"""
-    try:
-        user = db.users.find_one({"_id": user_id})
-        if not user:
-            return None
-
-        return {
-            "preferences": user.get("preferences", {}),
-            "saved_places": user.get("saved_places", []),
-            "search_history": list(db.search_queries.find({"user_id": user_id})),
-            "interactions": list(db.interactions.find({"user_id": user_id}))
-        }
-    except Exception as e:
-        print(f"Error fetching user data: {e}")
-        return None
-
-# ✅ Places Management Functions
-def get_previously_shown_places(user_id: str):
-    """Get all places previously shown to a user"""
-    try:
-        user_shown = db.user_shown_places.find_one({"user_id": user_id})
-        return user_shown.get("place_ids", []) if user_shown else []
-    except Exception as e:
-        print(f"Error getting previously shown places: {e}")
-        return []
-
-def get_last_shown_places(user_id: str):
-    """Get only the places shown in the most recent request"""
-    try:
-        user_shown = db.user_shown_places.find_one({"user_id": user_id})
-        return user_shown.get("last_shown_place_ids", []) if user_shown else []
-    except Exception as e:
-        print(f"Error getting last shown places: {e}")
-        return []
-
-def reset_user_shown_places(user_id: str):
-    """Reset the tracking of places shown to a user"""
-    try:
-        result = db.user_shown_places.delete_one({"user_id": user_id})
-        deleted = result.deleted_count > 0
-        print(f"Reset shown places for user {user_id}, success: {deleted}")
-        return deleted
-    except Exception as e:
-        print(f"Error resetting shown places: {e}")
-        return False
-
-def update_shown_places(user_id: str, new_place_ids, max_places=None):
-    """Update the list of shown places for a user"""
-    try:
-        if not new_place_ids:  # Skip update if no new places
-            return get_previously_shown_places(user_id)
-
-        existing_places = get_previously_shown_places(user_id)
-
-        # Add new places that aren't already in the list
-        all_place_ids = existing_places + [pid for pid in new_place_ids if pid not in existing_places]
-
-        # If max_places is set, limit the list to the most recent places
-        if max_places and len(all_place_ids) > max_places:
-            all_place_ids = all_place_ids[-max_places:]
-
-        # Update the database with all shown places and timestamp for TTL
-        db.user_shown_places.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "place_ids": all_place_ids,
-                "last_shown_place_ids": new_place_ids,  # Track only this request's places
-                "timestamp": datetime.now()  # Add timestamp for TTL expiration
-            }},
-            upsert=True
-        )
-
-        return all_place_ids
-    except Exception as e:
-        print(f"Error updating shown places: {e}")
-        return []
-
-# ✅ Core Recommendation Algorithms
-
-def get_candidate_places(user_prefs, user_id):
-    """Get candidate places based on user preferences and search history"""
-    try:
-        categories = user_prefs.get("categories", [])
-
-        # Handle empty categories
-        if not categories:
-            return []
-
-        # Fetch places based on categories (60%)
-        category_places = list(db.places.find({"category": {"$in": categories}}))
-
-        # Fetch only the last 5 search queries for this user, sorted by timestamp
-        search_queries = list(db.search_queries.find(
-            {"user_id": user_id}
-        ).sort("timestamp", -1).limit(5))
-
-        # Extract keywords from search queries
-        search_keywords = set()
-        for query in search_queries:
-            if "keywords" in query and isinstance(query["keywords"], list):
-                for keyword in query["keywords"]:
-                    search_keywords.add(keyword)
-
-        # Get all places for semantic similarity matching
-        all_places = list(db.places.find())
-
-        # Initialize semantic matching scores
-        keyword_place_scores = {}
-
-        # Process each keyword with NLP
-        for keyword in search_keywords:
-            # Process the keyword with spaCy
-            keyword_doc = nlp(keyword.lower())
-
-            # Compare with tags for each place
-            for place in all_places:
-                place_id = place["_id"]
-
-                # Initialize score for this place if it doesn't exist
-                if place_id not in keyword_place_scores:
-                    keyword_place_scores[place_id] = 0
-
-                # Check each tag for similarity
-                if "tags" in place and isinstance(place["tags"], list):
-                    for tag in place["tags"]:
-                        # Process the tag with spaCy
-                        tag_doc = nlp(tag.lower())
-
-                        # Calculate similarity score (0-1)
-                        similarity = keyword_doc.similarity(tag_doc)
-
-                        # Consider it a match if similarity is above threshold (0.6)
-                        if similarity > 0.6:
-                            # Add similarity score to place
-                            keyword_place_scores[place_id] += similarity
-
-        # Get top matching places based on semantic similarity
-        semantic_matches = [(place_id, score) for place_id, score in keyword_place_scores.items() if score > 0]
-        semantic_matches.sort(key=lambda x: x[1], reverse=True)
-
-        # Get the top matches (limit to 30 for performance)
-        top_semantic_matches = semantic_matches[:30]
-
-        # Get the actual place documents for the matches
-        keyword_places = []
-        if top_semantic_matches:
-            matched_ids = [match[0] for match in top_semantic_matches]
-            keyword_places = list(db.places.find({"_id": {"$in": matched_ids}}))
-
-            # Sort them in the same order as the semantic matches
-            id_to_place = {place["_id"]: place for place in keyword_places}
-            keyword_places = [id_to_place[match_id] for match_id, _ in top_semantic_matches if match_id in id_to_place]
-
-        # Protect against empty results or division by zero
-        total_category_places = len(category_places)
-        category_count = min(total_category_places, max(1, int(total_category_places * 0.6))) if total_category_places > 0 else 0
-
-        total_keyword_places = len(keyword_places)
-        keyword_count = min(total_keyword_places, max(1, int(total_keyword_places * 0.4))) if total_keyword_places > 0 else 0
-
-        # Combine results
-        result = []
-        if category_count > 0:
-            result.extend(category_places[:category_count])
-        if keyword_count > 0:
-            result.extend(keyword_places[:keyword_count])
-
-        return result
-    except Exception as e:
-        print(f"Error getting candidate places: {e}")
-        return []
-
-def get_collaborative_recommendations(user_id):
-    """Get places from similar users based on various interactions"""
-    try:
-        user = db.users.find_one({"_id": user_id})
-        if not user:
-            return []
-
-        # Get user preferences
-        user_prefs = user.get("preferences", {})
-        preferred_categories = user_prefs.get("categories", [])
-        preferred_tags = user_prefs.get("tags", [])
-
-        # Find similar users
-        similar_users = list(db.users.find({
-            "preferences.categories": {"$in": preferred_categories},
-            "preferences.tags": {"$in": preferred_tags},
-            "_id": {"$ne": user_id}
-        }))
-
-        # Define weights for different interaction types
-        action_weights = {
-            "like": 5,
-            "save": 4,
-            "share": 3,
-            "comment": 3,
-            "view": 2,
-            "click": 1,
-            "dislike": -5
-        }
-
-        # Get current time consistently as timezone-naive
-        current_date = datetime.now().replace(tzinfo=None).date()
-
-        # Time decay factor for older interactions
-        def apply_time_decay(weight, interaction_time):
-            # Parse the timestamp string if needed
-            if isinstance(interaction_time, str):
-                try:
-                    # Try to parse string timestamp and remove timezone
-                    timestamp = interaction_time.split("T")[0]  # Take just the date part
-                    interaction_time = datetime.strptime(timestamp, "%Y-%m-%d").date()
-                except Exception as e:
-                    # If parsing fails, use current date
-                    interaction_time = current_date
-            # If it's already a datetime, convert to date
-            elif hasattr(interaction_time, 'date'):
-                try:
-                    interaction_time = interaction_time.replace(tzinfo=None).date()
-                except:
-                    interaction_time = current_date
-            else:
-                # Fallback to current date
-                interaction_time = current_date
-
-            # Calculate days between dates
-            days_ago = max(0, (current_date - interaction_time).days)
-            decay = math.exp(-days_ago / 30)  # Exponential decay over 30 days
-            return weight * decay
-
-        # Track recommended places
-        recommended_places = set()
-
-        # Get existing interactions for user
-        user_interactions = {}
-        for i in db.interactions.find({"user_id": user_id}):
-            if "place_id" in i and "interaction_type" in i:
-                user_interactions[i["place_id"]] = i["interaction_type"]
-
-        # Process interactions from similar users
-        for similar_user in similar_users:
-            interactions = list(db.interactions.find({"user_id": similar_user["_id"]}))
-
-            for interaction in interactions:
-                # Skip if place_id or interaction_type is missing
-                if "place_id" not in interaction or "interaction_type" not in interaction:
-                    continue
-
-                place_id = interaction["place_id"]
-                action = interaction["interaction_type"]
-
-                # Get timestamp with fallback to current date
-                timestamp = interaction.get("timestamp", current_date)
-
-                # Skip if user already dislikes this place
-                if place_id in user_interactions and user_interactions[place_id] == "dislike":
-                    continue
-
-                weight = action_weights.get(action, 1)  # Default weight of 1 for unknown actions
-                weighted_score = apply_time_decay(weight, timestamp)
-
-                # Only add positively scored places
-                if weighted_score > 0:
-                    recommended_places.add(place_id)
-
-        return list(recommended_places)
-    except Exception as e:
-        print(f"Error in collaborative filtering: {e}")
-        return []
-
-def get_trending_places(limit=20):
-    """Get places that are trending based on recent interactions"""
-    try:
-        # Get interactions from last 14 days
-        two_weeks_ago = datetime.now().replace(tzinfo=None) - timedelta(days=14)
-
-        # Find recent interactions and aggregate by place_id
-        pipeline = [
-            {
-                "$match": {
-                    "timestamp": {"$gte": two_weeks_ago},
-                    "interaction_type": {"$in": ["like", "save", "share", "view"]}
-                }
-            },
-            {
-                "$group": {
-                    "_id": "$place_id",
-                    "interaction_count": {"$sum": 1}
-                }
-            },
-            {"$sort": {"interaction_count": -1}},
-            {"$limit": limit}
-        ]
-
-        trending_results = list(db.interactions.aggregate(pipeline))
-        trending_place_ids = [result["_id"] for result in trending_results]
-
-        # Get actual place documents
-        trending_places = list(db.places.find({"_id": {"$in": trending_place_ids}}))
-
-        # Sort by the original trending order
-        id_to_place = {place["_id"]: place for place in trending_places}
-        sorted_trending = [id_to_place[place_id] for place_id in trending_place_ids if place_id in id_to_place]
-
-        return sorted_trending
-    except Exception as e:
-        print(f"Error getting trending places: {e}")
-        return []
-
-def get_discovery_places(user_id, limit=10):
-    """Get places outside the user's normal patterns for discovery"""
-    try:
-        user_data = get_user_data(user_id)
-        if not user_data:
-            return []
-
-        user_prefs = user_data["preferences"]
-        user_categories = user_prefs.get("categories", [])
-
-        # Get user's region preferences to exclude them
-        user_regions = user_prefs.get("regions", [])
-
-        # Find places in different categories but highly rated
-        discovery_query = {
-            "category": {"$nin": user_categories},
-            "average_rating": {"$gte": 4.0}  # Only high-rated places
-        }
-
-        # If user has region preferences, include some places from other regions
-        if user_regions:
-            discovery_query["region"] = {"$nin": user_regions}
-
-        # Get discovery places and sort by rating
-        discovery_places = list(db.places.find(discovery_query).sort("average_rating", -1).limit(limit * 2))
-
-        # If we don't have enough, try a broader search
-        if len(discovery_places) < limit:
-            fallback_places = list(db.places.find({
-                "category": {"$nin": user_categories}
-            }).sort("average_rating", -1).limit(limit * 2))
-
-            # Add any new places not already in discovery_places
-            existing_ids = set(p["_id"] for p in discovery_places)
-            for place in fallback_places:
-                if place["_id"] not in existing_ids:
-                    discovery_places.append(place)
-                    if len(discovery_places) >= limit * 2:
-                        break
-
-        # Randomize the order for more variety in recommendations
-        if discovery_places:
-            random.shuffle(discovery_places)
-
-        return discovery_places[:limit]
-    except Exception as e:
-        print(f"Error getting discovery places: {e}")
-        return []
-
-def rank_places(candidate_places, user_id):
-    """Rank places based on user engagement and popularity"""
-    # Helper function to extract numeric value from MongoDB document fields
-    def extract_number(value):
-        if isinstance(value, dict):
-            # Handle MongoDB numeric types
-            if "$numberDouble" in value:
-                return float(value["$numberDouble"])
-            if "$numberInt" in value:
-                return int(value["$numberInt"])
-            if "$numberLong" in value:
-                return int(value["$numberLong"])
-        return value or 0  # Return the value itself if not a dict, or 0 if None/falsy
-
-    try:
-        if not candidate_places:
-            return []
-
-        scaler = MinMaxScaler()
-
-        for place in candidate_places:
-            interactions_count = db.interactions.count_documents({"user_id": user_id, "place_id": place["_id"]})
-
-            # Extract numeric values correctly
-            avg_rating = extract_number(place.get("average_rating", 0))
-            likes = extract_number(place.get("likes", 0))
-
-            place["score"] = (
-                0.4 * avg_rating +
-                0.3 * likes / 10000 +
-                0.3 * interactions_count
-            )
-
-        scores = [[p["score"]] for p in candidate_places]
-        if scores:
-            scaled_scores = scaler.fit_transform(scores)
-            for i, place in enumerate(candidate_places):
-                place["final_score"] = float(scaled_scores[i][0])  # Convert numpy type to float
-        else:
-            for place in candidate_places:
-                place["final_score"] = 0  # Default score if no data available
-
-        # Use final_score for sorting, not the objects themselves
-        return sorted(candidate_places, key=lambda x: x.get("final_score", 0), reverse=True)
-    except Exception as e:
-        print(f"Error ranking places: {e}")
-        # Use average_rating for fallback sorting, but extract numeric value first
-        return sorted(candidate_places,
-                     key=lambda x: extract_number(x.get("average_rating", 0)),
-                     reverse=True)  # Fallback sorting
-
-def refresh_shown_places(user_id, shown_place_ids, limit=10):
-    """Re-rank and refresh previously shown places"""
-    try:
-        if not shown_place_ids:
-            return []
-
-        # Get the place documents
-        shown_places = list(db.places.find({"_id": {"$in": shown_place_ids}}))
-
-        if not shown_places:
-            return []
-
-        # Get recent interaction data for all users
-        recent_date = datetime.now() - timedelta(days=7)
-
-        # Count recent interactions for each place
-        place_interaction_counts = {}
-        for place_id in shown_place_ids:
-            count = db.interactions.count_documents({
-                "place_id": place_id,
-                "timestamp": {"$gte": recent_date},
-                "interaction_type": {"$in": ["like", "save", "share", "view"]}
-            })
-            place_interaction_counts[place_id] = count
-
-        # Add recency score to places
-        for place in shown_places:
-            place["recency_score"] = place_interaction_counts.get(place["_id"], 0)
-
-        # Sort by recency score and add some randomness
-        refreshed_places = sorted(shown_places, key=lambda x: x.get("recency_score", 0) + random.random(), reverse=True)
-
-        return refreshed_places[:limit]
-    except Exception as e:
-        print(f"Error refreshing shown places: {e}")
-        return []
-
-async def background_cache_recommendations(user_id: str, count: int = 6):
-    """
-    Background task to generate and cache multiple recommendation sequences
-    Uses locking to prevent duplicate work
-    """
-    # Try to acquire the lock
-    if not acquire_cache_lock(user_id):
-        print(f"Cache generation already in progress for user {user_id}")
-        return
+def get_user_preferences(user_id):
+    """Get user general preferences (categories & tags only)"""
+    user = users_collection.find_one({"_id": user_id})
     
-    try:
-        # Get the next sequence number
-        start_sequence = get_next_sequence(user_id)
-        print(f"Starting background caching for user {user_id}, starting from sequence {start_sequence}")
+    if not user:
+        return None
         
-        # Get all previously shown places to maintain continuity
-        all_shown_place_ids = get_previously_shown_places(user_id)
-        
-        # Generate and store each sequence
-        for i in range(count):
-            current_sequence = start_sequence + i
-            
-            # Generate new recommendations, building on previously shown places
-            recommendations = generate_final_recommendations(user_id)
-            
-            # Store this set of recommendations in the cache
-            if "recommendations" in recommendations:
-                store_cache_entry(user_id, recommendations, current_sequence)
-                
-                # Update the list of shown places for next iteration
-                if "recommendations" in recommendations:
-                    new_place_ids = [p["_id"] for p in recommendations["recommendations"][:10]]
-                    all_shown_place_ids = update_shown_places(user_id, new_place_ids, max_places=None)
-            
-            # Small delay to prevent overloading the server
-            await asyncio.sleep(0.5)
-            
-        print(f"Completed background caching for user {user_id}")
-    except Exception as e:
-        print(f"Error in background caching: {e}")
-    finally:
-        # Always release the lock
-        release_cache_lock(user_id)
-
-def generate_final_recommendations(user_id):
-    """Generate final recommendations by combining all algorithms"""
-    try:
-        user_data = get_user_data(user_id)
-        if not user_data:
-            return {"error": "User not found"}
-
-        # Get previously shown places for this user
-        previously_shown_place_ids = get_previously_shown_places(user_id)
-        print(f"Found {len(previously_shown_place_ids)} previously shown places")
-
-        # Get content-based and collaborative recommendations
-        content_based = get_candidate_places(user_data["preferences"], user_id)
-        print(f"Found {len(content_based)} content-based places")
-
-        collaborative_place_ids = get_collaborative_recommendations(user_id)
-        collaborative = list(db.places.find({"_id": {"$in": collaborative_place_ids}}))
-        print(f"Found {len(collaborative)} collaborative places")
-
-        # Combine and rank all places
-        all_places = content_based + collaborative
-        print(f"Total combined places: {len(all_places)}")
-
-        all_ranked_places = rank_places(all_places, user_id)
-
-        # Get only places that haven't been shown before
-        new_places = [p for p in all_ranked_places if p["_id"] not in previously_shown_place_ids]
-        print(f"New places available: {len(new_places)}")
-
-        # If we have less than 10 new places, supplement with discovery places
-        if len(new_places) < 10:
-            print(f"Not enough new places, adding discovery places")
-
-            # Get number of additional places needed
-            additional_needed = 10 - len(new_places)
-
-            # Try to get trending places first (outside user's normal patterns)
-            trending_places = get_trending_places(limit=additional_needed*2)
-            trending_places = [p for p in trending_places if p["_id"] not in previously_shown_place_ids
-                              and p["_id"] not in [np["_id"] for np in new_places]]
-
-            # If still not enough, get discovery places (outside user's preferences)
-            if len(trending_places) < additional_needed:
-                discovery_places = get_discovery_places(user_id, limit=additional_needed*2)
-                discovery_places = [p for p in discovery_places if p["_id"] not in previously_shown_place_ids
-                                  and p["_id"] not in [np["_id"] for np in new_places]
-                                  and p["_id"] not in [tp["_id"] for tp in trending_places]]
-
-                # Add discovery places to trending places
-                trending_places.extend(discovery_places)
-
-            # If still not enough, try to refresh some old places
-            if len(trending_places) < additional_needed and previously_shown_place_ids:
-                print("Still not enough places, refreshing some previously shown places")
-                refreshed_places = refresh_shown_places(user_id, previously_shown_place_ids, limit=additional_needed*2)
-
-                # Only include refreshed places not already in new_places or trending_places
-                refreshed_places = [p for p in refreshed_places
-                                  if p["_id"] not in [np["_id"] for np in new_places]
-                                  and p["_id"] not in [tp["_id"] for tp in trending_places]]
-
-                # Add some of the refreshed places to trending_places
-                trending_places.extend(refreshed_places)
-
-            # Take only what we need from trending places
-            trending_to_use = trending_places[:additional_needed]
-
-            # Add these to new places
-            new_places.extend(trending_to_use)
-
-            print(f"After supplementing: {len(new_places)} places available")
-
-        # Take exactly 10 new places (or all if less than 10 are available)
-        new_places_to_show = new_places[:10]
-        print(f"New places to show: {len(new_places_to_show)}")
-
-        # Get places from the last request specifically (not all history)
-        last_shown_place_ids = get_last_shown_places(user_id)
-        old_places = [p for p in all_ranked_places if p["_id"] in last_shown_place_ids]
-        print(f"Places from last request to include: {len(old_places)}")
-
-        # Limit old places to a maximum of 20
-        old_places_to_show = old_places[:20]
-        print(f"Places from last request to show (limited): {len(old_places_to_show)}")
-
-        # Combine new places (at top) with old places (at bottom)
-        final_places = new_places_to_show + old_places_to_show
-        print(f"Total places in response: {len(final_places)}")
-
-        # Update the list of shown places with just the new ones we're showing
-        new_place_ids = [p["_id"] for p in new_places_to_show]
-        update_shown_places(user_id, new_place_ids, max_places=None)  # No maximum - track all shown places
-
-        return {"user_id": user_id, "recommendations": final_places}
-    except Exception as e:
-        print(f"Error generating recommendations: {e}")
-        return {"error": f"Error generating recommendations: {str(e)}"}
-
-# ✅ API Endpoints
-
-@app.get("/")
-async def root():
-    """Root endpoint"""
+    # Handle the nested preferences structure
+    preferences = user.get("preferences", {})
+    
     return {
-        "message": "Travel Recommendation API",
-        "version": "2.0",
-        "status": "active",
-        "features": [
-            "Content-based recommendations",
-            "Collaborative filtering",
-            "Trending places",
-            "Discovery mode",
-            "Enhanced caching system"
-        ],
-        "endpoints": {
-            "recommendations": "/recommendations/{user_id}",
-            "cache_status": "/cache/status/{user_id}",
-            "clear_cache": "/cache/{user_id}",
-            "force_generation": "/cache/generate/{user_id}",
-            "cache_stats": "/cache/stats"
-        }
+        "preferred_categories": preferences.get("categories", []),
+        "preferred_tags": preferences.get("tags", []),
     }
 
-@app.get("/db-status")
-async def db_status():
-    """Check MongoDB connection status"""
-    try:
-        # Ping the database
-        client.admin.command('ping')
-        return {"status": "connected", "message": "Successfully connected to MongoDB"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+def get_user_travel_preferences(user_id):
+    """Get user travel-specific preferences, including budget"""
+    travel_prefs = travel_preferences_collection.find_one(
+        {"user_id": user_id}
+    )
+    
+    if not travel_prefs:
+        return None
+        
+    return {
+        "destinations": travel_prefs.get("destinations", []),
+        "travel_dates": travel_prefs.get("travel_dates", ""),
+        "accessibility_needs": travel_prefs.get("accessibility_needs", []),
+        "budget": travel_prefs.get("budget", "medium"),  # Default to 'medium' if missing
+        "group_type": travel_prefs.get("group_type", "")  # Added group_type
+    }
 
-@app.get("/cache/stats")
-async def cache_stats():
-    """Get cache statistics"""
+def compute_text_similarity(text1, text2):
+    """
+    Compute similarity between two text strings.
+    Falls back to basic word overlap if NLP model doesn't have vectors.
+    """
+    if not text1 or not text2:
+        return 0
+        
     try:
-        # Count total cache entries
-        total_entries = db.recommendation_cache.count_documents({})
+        # Try using spaCy word vectors
+        doc1 = nlp(text1.lower())
+        doc2 = nlp(text2.lower())
         
-        # Count active locks
-        active_locks = db.cache_locks.count_documents({})
+        # Check if vectors are available (not all models have vectors)
+        if doc1.vector_norm and doc2.vector_norm:
+            return doc1.similarity(doc2)
         
-        # Get counts by user
+        # Fall back to basic word overlap if vectors aren't available
+        words1 = set(word.lower() for word in text1.split())
+        words2 = set(word.lower() for word in text2.split())
+        
+        if not words1 or not words2:
+            return 0
+            
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        return len(intersection) / len(union)
+        
+    except Exception as e:
+        logger.error(f"Error computing text similarity: {str(e)}")
+        
+        # Emergency fallback
+        return 0
+
+def parse_travel_dates(travel_dates_str):
+    """
+    Parse the travel_dates string to extract month information.
+    
+    Args:
+        travel_dates_str: String containing travel dates (e.g. "March 2025", "now", "August 2025")
+        
+    Returns:
+        String containing the month name or None if not parseable
+    """
+    if not travel_dates_str:
+        return None
+        
+    # If user selected "now", return current month
+    if travel_dates_str.lower() == "now":
+        return datetime.now().strftime("%B")  # Returns month name like "March"
+        
+    # Try to parse the string as a date
+    try:
+        # Assume format is like "March 2025" or similar
+        date_parts = travel_dates_str.split()
+        if len(date_parts) >= 1:
+            # First part should be the month name
+            month_name = date_parts[0].capitalize()
+            # Check if it's a valid month name
+            valid_months = [
+                "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            ]
+            if month_name in valid_months:
+                return month_name
+    except Exception as e:
+        logger.error(f"Error parsing travel dates: {e}")
+        
+    # Return current month as fallback
+    return datetime.now().strftime("%B")
+
+def apply_time_decay(weight, interaction_time):
+    """
+    Apply time-based decay to an interaction weight.
+    
+    Args:
+        weight: Base weight for the interaction
+        interaction_time: Timestamp of the interaction
+        
+    Returns:
+        Adjusted weight after time decay
+    """
+    # Convert to datetime object if it's a string
+    if isinstance(interaction_time, str):
+        try:
+            interaction_time = datetime.fromisoformat(interaction_time.replace('Z', '+00:00'))
+        except Exception as e:
+            logger.error(f"Error parsing timestamp: {e}")
+            return weight
+            
+    # Ensure both datetimes are timezone aware or both are naive
+    now = datetime.now()
+    
+    # If interaction_time is timezone aware, make now timezone aware too
+    if hasattr(interaction_time, 'tzinfo') and interaction_time.tzinfo is not None:
+        now = datetime.now(timezone.utc)
+        
+    # Calculate days between now and interaction
+    try:
+        days_ago = (now - interaction_time).days
+        decay = math.exp(-days_ago / 30)  # Exponential decay over 30 days
+        return weight * decay
+    except Exception as e:
+        logger.error(f"Error calculating time decay: {e}")
+        return weight  # Return original weight on error
+# --- PART 3: RECOMMENDATION ALGORITHM FUNCTIONS ---
+
+# --- Recommendation System: Core Functions ---
+
+def get_candidate_places(user_id, size=30):
+    """
+    Get candidate places for recommendations based on user preferences.
+    Returns a list of places that match user's preferred categories and tags.
+    """
+    user_prefs = get_user_preferences(user_id)
+    if not user_prefs:
+        # Fallback if no user preferences found
+        return list(places_collection.find().limit(size))
+    
+    # Extract user preferences
+    preferred_categories = user_prefs.get("preferred_categories", [])
+    preferred_tags = user_prefs.get("preferred_tags", [])
+    
+    # Combination query matching categories OR tags
+    query = {"$or": []}
+    
+    # Add category filter if we have preferred categories
+    if preferred_categories:
+        query["$or"].append({"category": {"$in": preferred_categories}})
+    
+    # Add tags filter if we have preferred tags
+    if preferred_tags:
+        query["$or"].append({"tags": {"$in": preferred_tags}})
+    
+    # If we have no preferences to query on, return all places
+    if not query["$or"]:
+        return list(places_collection.find().limit(size))
+        
+    # Query the database
+    candidate_places = list(places_collection.find(query).limit(size))
+    
+    # If we don't have enough candidates, add some random places
+    if len(candidate_places) < size:
+        # Get places that aren't already in our candidates
+        existing_ids = [p["_id"] for p in candidate_places]
+        additional_places = list(
+            places_collection.find({"_id": {"$nin": existing_ids}})
+            .limit(size - len(candidate_places))
+        )
+        candidate_places.extend(additional_places)
+    
+    return candidate_places
+
+def rank_places(places, user_id):
+    """
+    Rank places based on similarity to user preferences.
+    Returns a list of places sorted by relevance score.
+    """
+    user_prefs = get_user_preferences(user_id)
+    if not user_prefs:
+        # If no preferences, sort by rating
+        return sorted(places, key=lambda x: float(x.get("rating", 0)), reverse=True)
+    
+    preferred_categories = user_prefs.get("preferred_categories", [])
+    preferred_tags = user_prefs.get("preferred_tags", [])
+    
+    # Calculate scores for each place
+    scored_places = []
+    for place in places:
+        score = 0
+        
+        # Category match (0-100 points)
+        if place.get("category") in preferred_categories:
+            score += 60  # Heavy weight on category match
+        
+        # Tags match (0-40 points per tag, up to 40)
+        tag_score = 0
+        for tag in place.get("tags", []):
+            if tag in preferred_tags:
+                tag_score += 40 / len(preferred_tags) if preferred_tags else 0
+        score += min(tag_score, 40)
+        
+        # Rating boost (0-40 points)
+        # Convert rating to float, default to 0 if missing or invalid
+        try:
+            rating = float(place.get("rating", 0))
+            score += rating * (40 / 5)  # Scale rating (0-5) to (0-40)
+        except (ValueError, TypeError):
+            pass
+        
+        # Likes boost (0-30 points)
+        likes = place.get("likes", 0)
+        if likes > 0:
+            # Apply diminishing returns for likes
+            score += min(30, likes * 3)
+            
+        # Interactions boost (0-30 points)
+        # Check if user has interacted with this place (views, saves)
+        interactions = list(interactions_collection.find({
+            "user_id": user_id,
+            "place_id": place.get("_id", "")
+        }).limit(1))
+        
+        if interactions:
+            score += 30  # Boost places the user has interacted with
+            
+        scored_places.append((place, score))
+    
+    # Sort by score (descending) and return just the places
+    return [p[0] for p in sorted(scored_places, key=lambda x: x[1], reverse=True)]
+
+def filter_shown_places(places, user_id, include_from_last=5):
+    """
+    Filter out places that have been shown to the user recently,
+    but include some from the most recent request for continuity.
+    """
+    # Get places shown to this user, ordered by descending timestamp
+    shown_records = list(shown_places_collection.find(
+        {"user_id": user_id}
+    ).sort("timestamp", -1))
+    
+    # Get recently shown place IDs (all except those from the most recent request)
+    recent_place_ids = set()
+    most_recent_place_ids = set()
+    
+    for i, record in enumerate(shown_records):
+        shown_id = record.get("place_id")
+        if i < include_from_last:
+            most_recent_place_ids.add(shown_id)
+        else:
+            recent_place_ids.add(shown_id)
+    
+    # Filter out places that were shown recently (except for the most recent ones)
+    filtered_places = []
+    recent_places = []
+    
+    for place in places:
+        place_id = place.get("_id")
+        if place_id in most_recent_place_ids:
+            recent_places.append(place)
+        elif place_id not in recent_place_ids:
+            filtered_places.append(place)
+    
+    # If we don't have enough places after filtering, add some back from the shown places
+    if len(filtered_places) < 10:
+        # Return all we have
+        return filtered_places + recent_places
+    
+    # Add some places from the most recent request (for continuity)
+    # Take top places from filtered, reserve space for recent places
+    return filtered_places[:(10-len(recent_places))] + recent_places
+
+def get_trending_places(size=3):
+    """Get trending places based on recent interactions."""
+    # Get places with most interactions in the last 7 days
+    one_week_ago = datetime.now() - timedelta(days=7)
+    
+    # Aggregate to find most interacted places
+    try:
         pipeline = [
-            {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+            # Match recent interactions
+            {"$match": {"timestamp": {"$gte": one_week_ago}}},
+            # Group by place_id and count interactions
+            {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
+            # Sort by count descending
             {"$sort": {"count": -1}},
-            {"$limit": 10}  # Top 10 users by cache count
+            # Limit to specified size
+            {"$limit": size}
         ]
         
-        user_stats = list(db.recommendation_cache.aggregate(pipeline))
+        trending_ids = [doc["_id"] for doc in interactions_collection.aggregate(pipeline)]
         
-        # Get oldest and newest cache entries
-        oldest = list(db.recommendation_cache.find().sort("timestamp", 1).limit(1))
-        newest = list(db.recommendation_cache.find().sort("timestamp", -1).limit(1))
-        
-        oldest_time = oldest[0]["timestamp"] if oldest else None
-        newest_time = newest[0]["timestamp"] if newest else None
-        
-        # Get current time for reference
-        now = datetime.now()
-        
-        # Calculate age of oldest entry
-        age_minutes = None
-        if oldest_time:
-            age_seconds = (now - oldest_time).total_seconds()
-            age_minutes = round(age_seconds / 60, 2)
-        
-        return {
-            "total_cache_entries": total_entries,
-            "active_generation_locks": active_locks,
-            "top_users": [{"user_id": stats["_id"], "cache_count": stats["count"]} for stats in user_stats],
-            "oldest_entry_time": oldest_time,
-            "newest_entry_time": newest_time,
-            "oldest_entry_age_minutes": age_minutes,
-            "shown_places_count": db.user_shown_places.count_documents({})
-        }
+        # Get the full place documents
+        trending_places = []
+        for place_id in trending_ids:
+            place = places_collection.find_one({"_id": place_id})
+            if place:
+                trending_places.append(place)
+                
+        return trending_places
     except Exception as e:
-        return {"error": f"Error getting cache stats: {str(e)}"}
+        logger.error(f"Error getting trending places: {str(e)}")
+        # Fallback to top-rated places if aggregation fails
+        return list(places_collection.find().sort("rating", -1).limit(size))
+
+def get_discovery_places(user_id, size=2):
+    """Get discovery places (random places from categories the user hasn't explored)."""
+    # Get user's interests
+    user_prefs = get_user_preferences(user_id)
+    if not user_prefs:
+        # No preferences - return random places
+        return list(places_collection.aggregate([{"$sample": {"size": size}}]))
+    
+    # Get categories the user has shown interest in
+    preferred_categories = set(user_prefs.get("preferred_categories", []))
+    
+    # Get all distinct categories
+    all_categories = places_collection.distinct("category")
+    
+    # Find categories the user hasn't explored
+    unexplored_categories = [c for c in all_categories if c not in preferred_categories]
+    
+    # If user has explored all categories, pick random ones
+    if not unexplored_categories:
+        unexplored_categories = all_categories
+    
+    # Select random categories for discovery
+    discovery_categories = random.sample(
+        unexplored_categories, 
+        min(len(unexplored_categories), 2)
+    )
+    
+    # Get places from these categories
+    discovery_places = []
+    places_needed = size
+    
+    for category in discovery_categories:
+        if places_needed <= 0:
+            break
+            
+        # Get random places from this category
+        category_places = list(places_collection.find(
+            {"category": category}
+        ).limit(places_needed))
+        
+        discovery_places.extend(category_places)
+        places_needed -= len(category_places)
+    
+    # If we still need more places, get random ones
+    if places_needed > 0:
+        existing_ids = [p["_id"] for p in discovery_places]
+        random_places = list(places_collection.find(
+            {"_id": {"$nin": existing_ids}}
+        ).limit(places_needed))
+        
+        discovery_places.extend(random_places)
+    
+    return discovery_places[:size]  # Ensure we don't exceed requested size
+
+def track_shown_places(user_id, places):
+    """Track places that have been shown to the user."""
+    if not places:
+        return
+        
+    # Get current timestamp
+    now = datetime.now()
+    
+    # Prepare bulk insert documents
+    documents = []
+    for place in places:
+        documents.append({
+            "user_id": user_id,
+            "place_id": place.get("_id"),
+            "timestamp": now,
+            "expires_at": now + timedelta(hours=6)  # Expire after 6 hours
+        })
+    
+    # Insert records (if any)
+    if documents:
+        try:
+            shown_places_collection.insert_many(documents)
+        except Exception as e:
+            logger.error(f"Error tracking shown places: {str(e)}")
+
+def generate_final_recommendations(user_id, num_recommendations=10):
+    """
+    Generate the final recommendations using the multi-stage process:
+    1. Get candidate places based on user preferences
+    2. Rank them by relevance
+    3. Filter out recently shown places
+    4. Add trending and discovery places
+    5. Track shown places
+    """
+    logger.info(f"Generating recommendations for user {user_id}")
+    
+    # 1. Get candidate places
+    candidates = get_candidate_places(user_id, size=30)
+    logger.info(f"Found {len(candidates)} candidate places")
+    
+    # 2. Rank candidates by relevance
+    ranked_places = rank_places(candidates, user_id)
+    logger.info(f"Ranked {len(ranked_places)} places")
+    
+    # 3. Filter out places the user has already seen
+    filtered_places = filter_shown_places(ranked_places, user_id)
+    logger.info(f"After filtering shown places: {len(filtered_places)} places")
+    
+    # 4. Add trending and discovery places
+    final_count = min(len(filtered_places), num_recommendations - 5)  # Reserve 5 slots
+    final_places = filtered_places[:final_count]
+    
+    # Add trending places (if we have space)
+    trending_places = get_trending_places()
+    # Only add trending places not already in the list
+    existing_ids = {p["_id"] for p in final_places}
+    for place in trending_places:
+        if len(final_places) >= num_recommendations:
+            break
+        if place["_id"] not in existing_ids:
+            final_places.append(place)
+            existing_ids.add(place["_id"])
+    
+    # Add discovery places (if we have space)
+    discovery_places = get_discovery_places(user_id)
+    for place in discovery_places:
+        if len(final_places) >= num_recommendations:
+            break
+        if place["_id"] not in existing_ids:
+            final_places.append(place)
+            existing_ids.add(place["_id"])
+    
+    # 5. Track shown places
+    track_shown_places(user_id, final_places)
+    
+    # Return final recommendations
+    return final_places[:num_recommendations]
+
+async def background_cache_recommendations(user_id, num_entries=6):
+    """
+    Background task to generate and cache multiple recommendation sets.
+    """
+    logger.info(f"Starting background caching for user {user_id}, generating {num_entries} entries")
+    
+    # Use a semaphore-like approach to prevent multiple processes for the same user
+    cache_lock_key = f"cache_lock_{user_id}"
+    
+    # Check if already being generated
+    lock = recommendations_cache_collection.find_one({"_id": cache_lock_key})
+    
+    if lock:
+        # Check if the lock is stale (older than 5 minutes)
+        lock_time = lock.get("timestamp", datetime.min)
+        if isinstance(lock_time, str):
+            try:
+                lock_time = datetime.fromisoformat(lock_time.replace('Z', '+00:00'))
+            except Exception:
+                lock_time = datetime.min
+                
+        if (datetime.now() - lock_time).total_seconds() < 300:  # 5 minutes
+            logger.info(f"Cache generation already in progress for user {user_id}")
+            return
+            
+        logger.info(f"Found stale lock for user {user_id}, proceeding with cache generation")
+    
+    # Set lock
+    recommendations_cache_collection.update_one(
+        {"_id": cache_lock_key},
+        {"$set": {"timestamp": datetime.now()}},
+        upsert=True
+    )
+    
+    try:
+        # Get highest sequence number
+        highest_seq = recommendations_cache_collection.find_one(
+            {"user_id": user_id, "_id": {"$ne": cache_lock_key}},
+            sort=[("sequence", -1)]
+        )
+        
+        next_seq = (highest_seq.get("sequence", -1) + 1) if highest_seq else 0
+        
+        # Generate and store recommendations
+        for i in range(num_entries):
+            # Generate a new set of recommendations
+            recommendations = generate_final_recommendations(user_id)
+            
+            # Store in cache with sequence number
+            recommendations_cache_collection.insert_one({
+                "user_id": user_id,
+                "sequence": next_seq + i,
+                "recommendations": recommendations,
+                "timestamp": datetime.now()
+            })
+            
+            logger.info(f"Cached recommendations for user {user_id}, sequence {next_seq + i}")
+            
+            # Short sleep to prevent MongoDB overload
+            await asyncio.sleep(0.5)
+            
+        logger.info(f"Successfully cached {num_entries} recommendation sets for user {user_id}")
+        
+    except Exception as e:
+        logger.error(f"Error in background caching for user {user_id}: {str(e)}")
+        
+    finally:
+        # Remove lock
+        recommendations_cache_collection.delete_one({"_id": cache_lock_key})
+
+# --- PART 4: ROADMAP ALGORITHM FUNCTIONS ---
+
+# --- Roadmap System: Filtering Functions ---
+
+def get_filtered_places(user_id):
+    """
+    Get places filtered by user's travel preferences including budget.
+    
+    Args:
+        user_id: The user ID to retrieve filtered places for.
+        
+    Returns:
+        List of places matching the user's travel preferences.
+    """
+    # Fetch user preferences (including budget)
+    travel_prefs = get_user_travel_preferences(user_id)
+    general_prefs = get_user_preferences(user_id)  # Get general preferences including budget
+    
+    if not travel_prefs or not travel_prefs.get("destinations", []):
+        return list(places_collection.find())  # Return all places if no preferences are found
+    
+    # Get all places initially
+    all_places = list(places_collection.find())
+    
+    # Step 1: Filter by preferred cities (location filter) - Apply this FIRST
+    preferred_cities = travel_prefs["destinations"]
+    filtered_places = []
+    
+    for place in all_places:
+        location = place.get("location", {})
+        city = location.get("city", "")
+        if city in preferred_cities:
+            filtered_places.append(place)
+    
+    # If no places match preferred cities, use all places
+    if not filtered_places:
+        logger.warning(f"No places found in preferred cities, using all places")
+        filtered_places = all_places
+    
+    # Step 2: Filter by appropriate travel time (seasonal filter)
+    travel_dates = travel_prefs.get("travel_dates", "")
+    if travel_dates:
+        target_month = parse_travel_dates(travel_dates)
+        logger.info(f"Filtering places for month: {target_month}")
+        
+        if target_month:
+            time_filtered_places = [
+                place for place in filtered_places
+                if "appropriate_time" in place and target_month in place["appropriate_time"]
+            ]
+            
+            # Only use time-filtered places if we have results
+            if time_filtered_places:
+                logger.info(f"Found {len(time_filtered_places)} places appropriate for {target_month}")
+                filtered_places = time_filtered_places
+            else:
+                logger.warning(f"No places found for month {target_month}, keeping previous filter results")
+    
+    # Step 3: Filter by budget
+    user_budget = travel_prefs.get("budget", "medium")  # Get budget from travel_prefs instead
+    budget_filtered_places = [
+        place for place in filtered_places
+        if "budget" in place and user_budget in place["budget"]
+    ]
+    
+    # Only use budget-filtered places if we have results
+    if budget_filtered_places:
+        logger.info(f"Found {len(budget_filtered_places)} places matching budget: {user_budget}")
+        filtered_places = budget_filtered_places
+    else:
+        logger.warning(f"No places found matching budget {user_budget}, keeping previous filter results")
+    
+    # Step 4: Filter by accessibility needs
+    required_accessibility = travel_prefs.get("accessibility_needs", [])
+    if required_accessibility:
+        accessibility_filtered_places = [
+            place for place in filtered_places
+            if any(need in place.get("accessibility", []) for need in required_accessibility)
+        ]
+        
+        # Only use accessibility-filtered places if we have results
+        if accessibility_filtered_places:
+            logger.info(f"Found {len(accessibility_filtered_places)} places matching accessibility needs")
+            filtered_places = accessibility_filtered_places
+        else:
+            logger.warning(f"No places found matching accessibility needs, keeping previous filter results")
+    
+    # Step 5: Filter by group_type (30% weight in recommendations)
+    group_type = travel_prefs.get("group_type", "")
+    logger.info(f"User group_type: {group_type}")  # Log the user's group type
+    
+    if group_type:
+        # Now filter by group_type (not suitable_for)
+        group_filtered_places = [
+            place for place in filtered_places
+            if "group_type" in place and (
+                (isinstance(place["group_type"], list) and group_type in place["group_type"]) or
+                (not isinstance(place["group_type"], list) and group_type == place["group_type"])
+            )
+        ]
+        
+        logger.info(f"Found {len(group_filtered_places)} places matching group type: {group_type}")
+        
+        # If we have group-filtered places, apply 30% weighting
+        if group_filtered_places:
+            original_count = int(len(filtered_places) * 0.7)
+            group_count = len(filtered_places) - original_count
+            
+            # Keep top 70% of original filtered places
+            final_places = filtered_places[:original_count]
+            
+            # Add unique group-filtered places (up to 30%)
+            existing_ids = {place["_id"] for place in final_places}
+            for place in group_filtered_places:
+                if place["_id"] not in existing_ids and len(final_places) < len(filtered_places):
+                    final_places.append(place)
+                    existing_ids.add(place["_id"])
+                    
+                    # Stop if we've added enough places
+                    if len(final_places) >= (original_count + group_count):
+                        break
+            
+            filtered_places = final_places
+            logger.info(f"Applied group type filtering with 30% weight for {group_type}")
+        else:
+            logger.warning(f"No places found matching group type {group_type}, keeping previous filter results")
+    else:
+        logger.warning("No group type specified for user, skipping group type filtering")
+    
+    # If we have no places after all filters, return all places (fallback)
+    if not filtered_places:
+        logger.warning("No places left after all filters, returning all places")
+        return all_places
+    
+    return filtered_places
+
+def get_critical_filtered_places(user_id):
+    """
+    Filter places by critical constraints only (location).
+    
+    Args:
+        user_id: The user ID to retrieve preferences for
+        
+    Returns:
+        List of places in the user's preferred destinations
+    """
+    # Get travel preferences
+    travel_prefs = get_user_travel_preferences(user_id)
+    
+    # If no preferences, return all places
+    if not travel_prefs or not travel_prefs.get("destinations"):
+        logger.warning(f"No destination preferences found for user {user_id}, using all places")
+        return list(places_collection.find())
+    
+    # Get all places
+    all_places = list(places_collection.find())
+    
+    # Critical filter: Preferred cities (location filter)
+    preferred_cities = travel_prefs.get("destinations", [])
+    filtered_places = []
+    
+    for place in all_places:
+        location = place.get("location", {})
+        city = location.get("city", "")
+        if city in preferred_cities:
+            filtered_places.append(place)
+    
+    # If no places match preferred cities, use all places as fallback
+    if not filtered_places:
+        logger.warning(f"No places found in preferred cities, using all places")
+        return all_places
+    
+    logger.info(f"Critical filtering found {len(filtered_places)} places in preferred destinations")
+    return filtered_places
+
+# --- Roadmap System: Ranking Functions ---
+
+def compute_similarity(place, user_prefs, travel_prefs=None):
+    """Compute similarity score between place and user preferences"""
+    score = 0
+    
+    # Fixed to handle potential missing fields or different structure
+    place_category = place.get("category", "")
+    place_tags = place.get("tags", [])
+    place_accessibility = place.get("accessibility", [])
+    
+    # Check if place category is in user's preferred categories
+    if user_prefs.get("preferred_categories") and place_category in user_prefs["preferred_categories"]:
+        score += 5
+        
+    # Check if any place tags are in user's preferred tags
+    if user_prefs.get("preferred_tags"):
+        for tag in place_tags:
+            if tag in user_prefs["preferred_tags"]:
+                score += 3
+                
+    # Check if place meets any accessibility needs (if travel_prefs is provided)
+    if travel_prefs and travel_prefs.get("accessibility_needs"):
+        for need in travel_prefs["accessibility_needs"]:
+            if need in place_accessibility:
+                score += 2
+                
+    return score
+
+def rank_places_content_based_hybrid(user_id, filtered_places):
+    """
+    Rank pre-filtered places by content-based similarity to user preferences.
+    
+    Args:
+        user_id: User ID to get preferences for
+        filtered_places: List of pre-filtered place documents
+        
+    Returns:
+        List of places sorted by similarity to user preferences
+    """
+    user_prefs = get_user_preferences(user_id)
+    travel_prefs = get_user_travel_preferences(user_id)
+    
+    if not user_prefs or not travel_prefs:
+        logger.warning(f"No preferences found for user {user_id}, ranking by rating")
+        return sorted(filtered_places, key=lambda x: float(x.get("rating", 0)), reverse=True)
+        
+    # Sort places by similarity score
+    ranked_places = sorted(
+        filtered_places,
+        key=lambda p: compute_similarity(p, user_prefs, travel_prefs),
+        reverse=True
+    )
+    
+    return ranked_places
+
+def get_collaborative_scores_hybrid(user_id, filtered_places):
+    """
+    Get collaborative filtering scores for pre-filtered places.
+    
+    Args:
+        user_id: User ID to get similar users for
+        filtered_places: List of pre-filtered place documents
+        
+    Returns:
+        Dictionary mapping place IDs to collaborative scores
+    """
+    user_prefs = get_user_preferences(user_id)
+    if not user_prefs:
+        return {}
+        
+    # Find users with similar preferences
+    similar_users = list(users_collection.find({
+        "$or": [
+            {"preferences.categories": {"$in": user_prefs.get("preferred_categories", [])}},
+            {"preferences.tags": {"$in": user_prefs.get("preferred_tags", [])}}
+        ]
+    }))
+    
+    # Create a set of filtered place IDs for quick lookup
+    filtered_place_ids = {place.get("_id") for place in filtered_places}
+    
+    # Dictionary to store place scores
+    place_scores = {}
+    
+    # Define weights for different interaction types
+    action_weights = {
+        "like": 5,
+        "save": 4,
+        "share": 3,
+        "comment": 3,
+        "view": 2,
+        "click": 1,
+        "dislike": -5
+    }
+    
+    for user in similar_users:
+        # Skip the current user
+        if user.get("_id") == user_id:
+            continue
+            
+        # Get interactions for this user
+        interactions = list(interactions_collection.find({"user_id": user.get("_id")}))
+        
+        for interaction in interactions:
+            place_id = interaction.get("place_id")
+            
+            # Skip if not in our filtered places
+            if place_id not in filtered_place_ids:
+                continue
+                
+            # Get interaction type/action
+            action = interaction.get("action", interaction.get("interaction_type", ""))
+            
+            # Get timestamp (fallback to current time if missing)
+            timestamp = interaction.get("timestamp", datetime.now())
+            
+            # Calculate weighted score with time decay
+            weight = action_weights.get(action, 0)
+            weighted_score = apply_time_decay(weight, timestamp)
+            
+            # Update place scores
+            if place_id in place_scores:
+                place_scores[place_id] += weighted_score
+            else:
+                place_scores[place_id] = weighted_score
+                
+    return place_scores
+
+def get_backup_places(user_id, existing_places):
+    """Get backup places in case we don't have enough recommendations"""
+    travel_prefs = get_user_travel_preferences(user_id)
+    if not travel_prefs or not travel_prefs.get("destinations", []):
+        return []
+        
+    preferred_cities = travel_prefs.get("destinations", [])
+    
+    # Get places not already in existing_places
+    existing_ids = [p["_id"] for p in existing_places]
+    all_places = list(places_collection.find({"_id": {"$nin": existing_ids}}))
+    
+    selected_places = list(places_collection.find({"location.city": {"$in": preferred_cities}}))
+    if not selected_places:
+        return []
+        
+    # Handle nested numeric values for coordinates
+    def get_coordinate(location_obj, key):
+        coordinate = location_obj.get(key, 0)
+        # Handle if coordinate is a MongoDB NumberDouble object
+        if isinstance(coordinate, dict) and "$numberDouble" in coordinate:
+            return float(coordinate["$numberDouble"])
+        return float(coordinate)
+        
+    # Calculate average location from preferred places
+    total_places = len(selected_places)
+    sum_lat = sum(get_coordinate(p["location"], "latitude") for p in selected_places)
+    sum_lon = sum(get_coordinate(p["location"], "longitude") for p in selected_places)
+    
+    avg_lat = sum_lat / total_places if total_places > 0 else 0
+    avg_lon = sum_lon / total_places if total_places > 0 else 0
+    
+    user_center_location = (avg_lat, avg_lon)
+    
+    # Sort places by distance to center
+    def get_distance(place):
+        try:
+            place_lat = get_coordinate(place["location"], "latitude")
+            place_lon = get_coordinate(place["location"], "longitude")
+            return geodesic(user_center_location, (place_lat, place_lon)).km
+        except Exception as e:
+            logger.error(f"Error calculating distance: {e}")
+            return float('inf')  # Return infinite distance on error
+            
+    all_places.sort(key=get_distance)
+    
+    return all_places[:10]
+
+# --- PART 5: ROADMAP GENERATION AND FORMATTING ---
+
+def generate_hybrid_roadmap(user_id):
+    """
+    Generate the final roadmap using the hybrid approach:
+    1. Apply critical filters first (location)
+    2. Run recommendations on this subset
+    3. Apply softer filters with weights
+    
+    Args:
+        user_id: User ID to generate roadmap for
+        
+    Returns:
+        List of recommended places
+    """
+    logger.info(f"🎯 Generating Hybrid Roadmap for {user_id}...")
+    
+    # Get user preferences for logging
+    user_prefs = get_user_preferences(user_id)
+    travel_prefs = get_user_travel_preferences(user_id)
+    
+    logger.info(f"User preferences: {user_prefs}")
+    logger.info(f"Travel preferences: {travel_prefs}")
+    
+    # 1. CRITICAL FILTERS FIRST: Apply absolute essentials (location)
+    critical_filtered_places = get_critical_filtered_places(user_id)
+    logger.info(f"Found {len(critical_filtered_places)} places after critical filtering")
+    
+    # 2. RUN RECOMMENDATIONS on pre-filtered subset
+    
+    # Content-based filtering
+    content_based_places = rank_places_content_based_hybrid(user_id, critical_filtered_places)
+    logger.info(f"Content-based ranking complete: {len(content_based_places)} places")
+    
+    # Collaborative filtering scores
+    try:
+        collaborative_scores = get_collaborative_scores_hybrid(user_id, critical_filtered_places)
+        logger.info(f"Collaborative scores generated for {len(collaborative_scores)} places")
+    except Exception as e:
+        logger.error(f"Error in collaborative filtering: {str(e)}")
+        collaborative_scores = {}
+    
+    # Combine scores with weights (70% content-based, 30% collaborative)
+    final_scored_places = []
+    
+    for i, place in enumerate(content_based_places):
+        # Content-based score based on position (higher = better)
+        content_score = 1.0 - (i / len(content_based_places)) if content_based_places else 0
+        
+        # Get collaborative score if available
+        collab_score = collaborative_scores.get(place.get("_id", ""), 0)
+        
+        # Normalize collaborative score (if we have scores)
+        if collaborative_scores:
+            max_collab = max(collaborative_scores.values()) if collaborative_scores.values() else 1
+            if max_collab > 0:
+                collab_score = collab_score / max_collab
+        
+        # Combined weighted score
+        final_score = (content_score * 0.7) + (collab_score * 0.3)
+        final_scored_places.append((place, final_score))
+    
+    # Sort by final score
+    sorted_places = [p[0] for p in sorted(final_scored_places, key=lambda x: x[1], reverse=True)]
+    
+    # 3. APPLY SOFTER FILTERS WITH WEIGHTS
+    final_places = []
+    
+    if travel_prefs:
+        # Get the filters we want to apply with weights
+        budget = travel_prefs.get("budget", "medium")
+        required_accessibility = travel_prefs.get("accessibility_needs", [])
+        group_type = travel_prefs.get("group_type", "")
+        travel_dates = travel_prefs.get("travel_dates", "")
+        target_month = parse_travel_dates(travel_dates) if travel_dates else None
+        
+        # Scoring function for soft constraints
+        def soft_constraint_score(place):
+            score = 0.0
+            
+            # Budget match (30% weight)
+            if "budget" in place and budget in place["budget"]:
+                score += 0.3
+            
+            # Accessibility match (20% weight)
+            if required_accessibility:
+                if any(need in place.get("accessibility", []) for need in required_accessibility):
+                    score += 0.2
+            else:
+                # If no accessibility needs specified, give full points
+                score += 0.2
+            
+            # Group type match (30% weight)
+            if group_type and "group_type" in place:
+                if (isinstance(place["group_type"], list) and group_type in place["group_type"]) or \
+                   (not isinstance(place["group_type"], list) and group_type == place["group_type"]):
+                    score += 0.3
+            else:
+                # If no group type specified, give full points
+                score += 0.3
+            
+            # Time/seasonal match (20% weight)
+            if target_month and "appropriate_time" in place and target_month in place["appropriate_time"]:
+                score += 0.2
+            elif not target_month:
+                # If no time specified, give full points
+                score += 0.2
+            
+            return score
+        
+        # Apply soft constraints with weighted scoring
+        soft_filtered_places = []
+        for place in sorted_places:
+            soft_score = soft_constraint_score(place)
+            soft_filtered_places.append((place, soft_score))
+        
+        # Sort by descending soft score, giving preference to places that meet more soft constraints
+        final_places = [p[0] for p in sorted(soft_filtered_places, key=lambda x: x[1], reverse=True)]
+    else:
+        # If no travel preferences, just use the ranked places
+        final_places = sorted_places
+    
+    # Add saved places from the user if they're in the filtered cities
+    user = users_collection.find_one({"_id": user_id})
+    if user and "saved_places" in user:
+        saved_place_ids = user.get("saved_places", [])
+        logger.info(f"User has {len(saved_place_ids)} saved places")
+        
+        for saved_place_id in saved_place_ids:
+            # Skip if we already have this place in final_places
+            if any(p.get("_id") == saved_place_id for p in final_places):
+                continue
+            
+            # Get saved place details
+            saved_place = places_collection.find_one({"_id": saved_place_id})
+            if saved_place:
+                # Check if it's in a preferred city
+                if travel_prefs and "destinations" in travel_prefs:
+                    location = saved_place.get("location", {})
+                    city = location.get("city", "")
+                    if city in travel_prefs["destinations"]:
+                        # Add to the beginning of the list
+                        final_places.insert(0, saved_place)
+                        logger.info(f"Added saved place {saved_place.get('name')} to recommendations")
+    
+    # Ensure we have at most 10 places
+    final_roadmap = final_places[:10]
+    logger.info(f"Final hybrid roadmap has {len(final_roadmap)} places")
+    
+    # Fallback to popular places if we have no recommendations
+    if not final_roadmap:
+        logger.warning(f"No places found after hybrid filtering for user {user_id}, returning popular places")
+        try:
+            # Get places with highest ratings
+            popular_places = list(places_collection.find().sort([("average_rating", -1)]).limit(10))
+            if not popular_places:
+                popular_places = list(places_collection.find().sort([("rating", -1)]).limit(10))
+            return popular_places
+        except Exception as e:
+            logger.error(f"Error getting popular places: {str(e)}")
+    
+    return final_roadmap
+
+def simplify_roadmap_to_list(roadmap_data):
+    """
+    Convert roadmap data to a simple list format without design elements
+    """
+    if not roadmap_data:
+        return []
+        
+    simplified_list = []
+    
+    # Process a list of roadmaps
+    if isinstance(roadmap_data, list):
+        for item in roadmap_data:
+            if isinstance(item, dict):
+                # Safely extract values with fallbacks for MongoDB document structure
+                def get_nested_value(obj, key, default=""):
+                    if "." in key:
+                        parts = key.split(".", 1)
+                        if parts[0] in obj and isinstance(obj[parts[0]], dict):
+                            return get_nested_value(obj[parts[0]], parts[1], default)
+                        return default
+                    return obj.get(key, default)
+                    
+                # Handle numeric values that might be MongoDB objects
+                def get_numeric_value(obj, key, default=0.0):
+                    value = get_nested_value(obj, key, default)
+                    if isinstance(value, dict) and "$numberDouble" in value:
+                        return float(value["$numberDouble"])
+                    if isinstance(value, dict) and "$numberInt" in value:
+                        return int(value["$numberInt"])
+                    return value
+                    
+                # Extract location data safely
+                location = item.get("location", {})
+                
+                # Extract essential information for each place
+                place_info = {
+                    "id": str(item.get("_id", "")),
+                    "name": item.get("name", ""),
+                    "description": item.get("description", ""),
+                    "category": item.get("category", ""),
+                    "location": {
+                        "city": location.get("city", ""),
+                        "country": location.get("country", ""),
+                        "latitude": get_numeric_value(location, "latitude", 0.0),
+                        "longitude": get_numeric_value(location, "longitude", 0.0)
+                    },
+                    "rating": get_numeric_value(item, "average_rating", 0),  # Use average_rating instead of rating
+                    "tags": item.get("tags", []),
+                    "accessibility": item.get("accessibility", []),
+                }
+                simplified_list.append(place_info)
+            elif isinstance(item, str):
+                simplified_list.append(item)
+                
+    return simplified_list
+
+async def get_roadmap_with_caching(user_id: str):
+    """
+    Get a roadmap for a user, with caching
+    
+    1. Check if user's travel preferences have changed since last generation
+    2. If unchanged, return cached roadmap if available
+    3. If changed or no cache, generate a new roadmap
+    """
+    # Get user's travel preferences
+    travel_prefs = get_user_travel_preferences(user_id)
+    
+    # Find existing roadmap for this user
+    existing_roadmap = roadmaps_collection.find_one({"user_id": user_id})
+    
+    # If we have an existing roadmap, check if preferences have changed
+    if existing_roadmap:
+        cached_prefs = existing_roadmap.get("travel_preferences", {})
+        cached_prefs_hash = hash(str(cached_prefs))
+        current_prefs_hash = hash(str(travel_prefs)) if travel_prefs else 0
+        
+        # If preferences haven't changed, use cached roadmap
+        if cached_prefs_hash == current_prefs_hash:
+            logger.info(f"Using cached roadmap for user {user_id} - preferences unchanged")
+            return existing_roadmap["roadmap_data"]
+        else:
+            logger.info(f"Travel preferences changed for user {user_id}, generating new roadmap")
+    
+    # Generate new roadmap
+    logger.info(f"Generating new roadmap for user {user_id}")
+    roadmap_data = generate_hybrid_roadmap(user_id)
+    
+    # Store in cache
+    now = datetime.now()
+    roadmaps_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "user_id": user_id,
+                "roadmap_data": roadmap_data,
+                "travel_preferences": travel_prefs,
+                "created_at": now
+            }
+        },
+        upsert=True
+    )
+    
+    return roadmap_data
+
+# --- PART 6: API ENDPOINTS AND SERVER STARTUP ---
+
+# --- Root endpoint ---
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to the Travel API", "status": "active"}
+
+# --- Recommendations API Endpoints ---
 
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(user_id: str, background_tasks: BackgroundTasks):
-    """Get recommendations for a user with caching support"""
+    """
+    Get recommendations for a specific user.
+    
+    If cached recommendations exist, return and replenish cache.
+    Otherwise, generate recommendations on-demand.
+    """
     try:
-        # Get all cached recommendations for this user, sorted by sequence
-        cached_entries = get_user_cached_recommendations(user_id)
-        
-        print(f"User {user_id} has {len(cached_entries)} cached recommendation sets")
-        
-        # If we have cached entries, use the first one
-        if cached_entries:
-            entry_to_use = cached_entries[0]
-            sequence = entry_to_use.get("sequence", 0)
-            print(f"Cache hit for user {user_id}, using sequence {sequence}")
-            
-            # Remove this entry from the cache
-            db.recommendation_cache.delete_one({"_id": entry_to_use["_id"]})
-            
-            # If we're running low on cached entries, schedule replenishment
-            remaining_count = len(cached_entries) - 1
-            if remaining_count <= 3:
-                print(f"Running low on cache for user {user_id}, scheduling background replenishment")
-                
-                # Only schedule if not already generating
-                if not db.cache_locks.find_one({"key": f"generating_{user_id}"}):
-                    background_tasks.add_task(
-                        background_cache_recommendations, 
-                        user_id=user_id,
-                        count=7 - remaining_count  # Top up to 7 total
-                    )
-            
-            # Return the cached recommendations
-            return entry_to_use["recommendations"]
-        
-        # No cache hit, generate recommendations now
-        print(f"No cache for user {user_id}, generating recommendations")
-        recommendations = generate_final_recommendations(user_id)
-        
-        # Store the first result in cache with sequence 0
-        store_cache_entry(user_id, recommendations, 0)
-        
-        # Generate additional recommendations in the background if no lock exists
-        if not db.cache_locks.find_one({"key": f"generating_{user_id}"}):
-            print(f"Scheduling background generation of additional recommendations")
-            background_tasks.add_task(
-                background_cache_recommendations, 
-                user_id=user_id,
-                count=6  # Generate 6 more sets
-            )
-        
-        return recommendations
-    except Exception as e:
-        print(f"Error processing recommendation request: {e}")
-        return {"error": f"Error processing request: {str(e)}"}
-
-@app.get("/cache/status/{user_id}")
-def get_cache_status(user_id: str):
-    """Check cache status for a user"""
-    try:
-        # Get all cached entries for this user
-        cached_entries = get_user_cached_recommendations(user_id)
-        
-        # Check if background generation is in progress
-        is_generating = False
-        lock = db.cache_locks.find_one({"key": f"generating_{user_id}"})
-        if lock:
-            is_generating = True
-            lock_time = lock.get("timestamp")
-        
-        # Expiry information
-        expiry_info = {}
-        if cached_entries:
-            oldest_entry = cached_entries[0]  # Already sorted by sequence
-            created_time = oldest_entry.get("timestamp")
-            if created_time:
-                # Calculate expiry time (6 hours from creation)
-                expiry_time = created_time + timedelta(hours=6)
-                now = datetime.now()
-                remaining_time = (expiry_time - now).total_seconds() / 60  # minutes
-                
-                expiry_info = {
-                    "created": created_time,
-                    "expires": expiry_time,
-                    "remaining_minutes": max(0, round(remaining_time, 2))
-                }
-        
-        # Get sequences as list
-        sequences = [entry.get("sequence") for entry in cached_entries]
-        
-        return {
-            "user_id": user_id,
-            "cache_entries": len(cached_entries),
-            "sequences": sequences,
-            "has_cache": len(cached_entries) > 0,
-            "is_generating": is_generating,
-            "generation_started_at": lock_time if is_generating else None,
-            "expiry": expiry_info
-        }
-    except Exception as e:
-        return {"error": f"Error checking cache status: {str(e)}"}
-
-@app.delete("/cache/{user_id}")
-def clear_user_cache_endpoint(user_id: str, reset_shown: bool = False):
-    """Clear cache and optionally shown places for a user"""
-    try:
-        # Clear the cache
-        deleted = clear_user_cache(user_id)
-        
-        # Also clear any locks for this user
-        lock_deleted = db.cache_locks.delete_one({"key": f"generating_{user_id}"}).deleted_count
-        
-        # Optionally reset shown places
-        shown_reset = False
-        if reset_shown:
-            shown_reset = reset_user_shown_places(user_id)
-        
-        return {
-            "message": f"Cleared {deleted} cache entries for user {user_id}",
-            "deleted_count": deleted,
-            "lock_cleared": lock_deleted > 0,
-            "shown_places_reset": shown_reset
-        }
-    except Exception as e:
-        return {"error": f"Error clearing cache: {str(e)}"}
-
-@app.post("/cache/generate/{user_id}")
-async def force_cache_generation(user_id: str, background_tasks: BackgroundTasks, count: int = 6):
-    """Force immediate cache generation for a user"""
-    try:
-        # Check if already generating
-        if db.cache_locks.find_one({"key": f"generating_{user_id}"}):
-            return {
-                "message": f"Cache generation already in progress for user {user_id}",
-                "status": "in_progress"
-            }
-        
-        # Schedule immediate generation
-        background_tasks.add_task(
-            background_cache_recommendations,
-            user_id=user_id,
-            count=count
+        # Try to get a cached entry first
+        cached_entry = recommendations_cache_collection.find_one(
+            {"user_id": user_id},
+            sort=[("sequence", 1)]  # Get the oldest entry (lowest sequence)
         )
         
-        return {
-            "message": f"Scheduled cache generation for user {user_id}",
-            "entries_to_generate": count,
-            "status": "scheduled"
-        }
-    except Exception as e:
-        return {"error": f"Error scheduling cache generation: {str(e)}"}
-
-@app.delete("/shown-places/{user_id}")
-def reset_shown_places_endpoint(user_id: str):
-    """Reset shown places tracking for a user"""
-    try:
-        success = reset_user_shown_places(user_id)
-        return {
-            "message": f"Reset shown places tracking for user {user_id}",
-            "success": success
-        }
-    except Exception as e:
-        return {"error": f"Error resetting shown places: {str(e)}"}
-
-@app.get("/search/{user_id}")
-async def search_user(
-    user_id: str,
-    query: str = Query(None, min_length=1),
-    limit: int = Query(10, ge=1, le=50)
-):
-    """Search for places with keyword matching"""
-    if not query:
-        return {"user_id": user_id, "query": "", "results": []}
-        
-    query_lower = query.lower()
-    
-    # Get all places
-    places = list(db.places.find({}))
-    
-    # Score places based on keyword matching
-    scored_places = []
-    for place in places:
-        name = place.get("name", "").lower()
-        desc = place.get("description", "").lower()
-        
-        # Calculate basic text matching score
-        name_score = 1.0 if query_lower in name else 0.0
-        desc_score = 0.5 if query_lower in desc else 0.0
-        
-        # Combined score
-        score = name_score + desc_score
-        
-        if score > 0:
-            scored_places.append({
-                "place_id": place.get("_id", ""),
-                "name": place.get("name", ""),
-                "score": score,
-                "data": place
+        if cached_entry:
+            # We have a cached entry - return it and replenish cache if running low
+            recommendations = cached_entry.get("recommendations", [])
+            
+            # Delete the used cache entry
+            recommendations_cache_collection.delete_one({"_id": cached_entry["_id"]})
+            
+            # Count remaining cache entries
+            remaining_count = recommendations_cache_collection.count_documents({"user_id": user_id})
+            
+            # If we're running low on cache entries (≤3), schedule background replenishment
+            if remaining_count <= 3:
+                logger.info(f"Cache running low for user {user_id}, scheduling replenishment")
+                background_tasks.add_task(background_cache_recommendations, user_id, 6)
+                
+            logger.info(f"Returning cached recommendations for user {user_id}, seq: {cached_entry.get('sequence')}")
+            
+            # Return recommendations from cache
+            return {
+                "success": True,
+                "user_id": user_id,
+                "cached": True,
+                "recommendations": recommendations
+            }
+        else:
+            # No cache - generate on demand
+            logger.info(f"No cached recommendations for user {user_id}, generating on demand")
+            recommendations = generate_final_recommendations(user_id)
+            
+            # Store as sequence 0 (on-demand generation)
+            recommendations_cache_collection.insert_one({
+                "user_id": user_id,
+                "sequence": 0,
+                "recommendations": recommendations,
+                "timestamp": datetime.now()
             })
+            
+            # Schedule cache generation for future requests
+            background_tasks.add_task(background_cache_recommendations, user_id, 6)
+            
+            return {
+                "success": True,
+                "user_id": user_id,
+                "cached": False,
+                "recommendations": recommendations
+            }
+            
+    except Exception as e:
+        logger.error(f"Error generating recommendations: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.post("/recommendations")
+async def create_recommendations(request: RecommendationRequest, background_tasks: BackgroundTasks):
+    """Generate recommendations for a user (force refresh)"""
+    try:
+        user_id = request.user_id
+        num_recommendations = request.num_recommendations
+        
+        # Generate fresh recommendations
+        recommendations = generate_final_recommendations(user_id, num_recommendations)
+        
+        # Clear existing cache for this user
+        recommendations_cache_collection.delete_many({"user_id": user_id})
+        
+        # Store as sequence 0 (new generation)
+        recommendations_cache_collection.insert_one({
+            "user_id": user_id,
+            "sequence": 0,
+            "recommendations": recommendations,
+            "timestamp": datetime.now()
+        })
+        
+        # Schedule cache generation for future requests
+        background_tasks.add_task(background_cache_recommendations, user_id, 6)
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "recommendations": recommendations
+        }
+        
+    except Exception as e:
+        logger.error(f"Error generating recommendations: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.post("/cache/generate/{user_id}")
+async def force_cache_generation(
+    user_id: str, 
+    num_entries: int = Query(6, ge=1, le=20),
+    background_tasks: BackgroundTasks
+):
+    """
+    Force cache generation for a user
     
-    # Sort by score and return top results
-    scored_places.sort(key=lambda x: x["score"], reverse=True)
+    This is an admin endpoint to trigger cache generation
+    """
+    # Check if generation is already in progress
+    cache_lock_key = f"cache_lock_{user_id}"
+    lock = recommendations_cache_collection.find_one({"_id": cache_lock_key})
+    
+    if lock:
+        # Check if the lock is stale (older than 5 minutes)
+        lock_time = lock.get("timestamp", datetime.min)
+        if isinstance(lock_time, str):
+            try:
+                lock_time = datetime.fromisoformat(lock_time.replace('Z', '+00:00'))
+            except Exception:
+                lock_time = datetime.min
+                
+        if (datetime.now() - lock_time).total_seconds() < 300:  # 5 minutes
+            return {
+                "success": True,
+                "message": f"Cache generation already in progress for user {user_id}"
+            }
+    
+    # Schedule cache generation
+    background_tasks.add_task(background_cache_recommendations, user_id, num_entries)
     
     return {
-        "user_id": user_id,
-        "query": query,
-        "results": scored_places[:limit]
+        "success": True,
+        "message": f"Started generation of {num_entries} cache entries for user {user_id}"
     }
 
+@app.delete("/shown-places/{user_id}")
+async def reset_shown_places(user_id: str):
+    """Reset all shown places for a user"""
+    try:
+        result = shown_places_collection.delete_many({"user_id": user_id})
+        deleted_count = result.deleted_count
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} shown place records for user {user_id}"
+        }
+    except Exception as e:
+        logger.error(f"Error resetting shown places: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.get("/search/{user_id}")
+async def search_places(
+    user_id: str,
+    query: str = Query(..., min_length=1),
+    limit: int = Query(10, ge=1, le=50)
+):
+    """
+    Search for places based on a text query
+    
+    Args:
+        user_id: User ID (for tracking)
+        query: Search query string
+        limit: Maximum number of results to return
+    """
+    try:
+        # Track search query
+        search_queries_collection.insert_one({
+            "user_id": user_id,
+            "query": query,
+            "timestamp": datetime.now()
+        })
+        
+        # Search in name and description fields
+        all_places = list(places_collection.find())
+        results = []
+        
+        for place in all_places:
+            score = 0
+            
+            # Exact name match - highest score
+            if query.lower() in place.get("name", "").lower():
+                score = 1.0
+            # Description match - partial score
+            elif "description" in place and query.lower() in place.get("description", "").lower():
+                score = 0.5
+                
+            if score > 0:
+                # Add to results with score
+                results.append({
+                    "place": place,
+                    "score": score
+                })
+                
+        # Sort by score (highest first) and limit results
+        sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
+        
+        # Extract just the place data
+        final_results = [item["place"] for item in sorted_results]
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "query": query,
+            "results": final_results
+        }
+        
+    except Exception as e:
+        logger.error(f"Error searching places: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+# --- Roadmap API Endpoints ---
+
+@app.get("/roadmap/{user_id}")
+async def get_roadmap(user_id: str):
+    """
+    Get a travel roadmap for a specific user
+    
+    Uses caching: Only regenerates if user's travel preferences have changed
+    """
+    try:
+        logger.info(f"Roadmap request for user {user_id}")
+        
+        # Get roadmap (cached or newly generated)
+        roadmap_data = await get_roadmap_with_caching(user_id)
+        
+        # Simplify to list format
+        simplified_list = simplify_roadmap_to_list(roadmap_data)
+        
+        return {"success": True, "user_id": user_id, "data": simplified_list}
+    except Exception as e:
+        logger.error(f"Error generating roadmap: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.post("/roadmap")
+async def create_roadmap(request: RoadmapRequest):
+    """
+    Generate a new travel roadmap for a user (force regeneration)
+    """
+    try:
+        user_id = request.user_id
+        logger.info(f"Force regenerating roadmap for user {user_id}")
+        
+        # Force generation of new roadmap
+        roadmap_data = generate_hybrid_roadmap(user_id)
+        
+        # Store in cache
+        now = datetime.now()
+        travel_prefs = get_user_travel_preferences(user_id)
+        roadmaps_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "user_id": user_id,
+                    "roadmap_data": roadmap_data,
+                    "travel_preferences": travel_prefs,
+                    "created_at": now
+                }
+            },
+            upsert=True
+        )
+        
+        # Simplify to list format
+        simplified_list = simplify_roadmap_to_list(roadmap_data)
+        
+        return {"success": True, "user_id": user_id, "data": simplified_list}
+    except Exception as e:
+        logger.error(f"Error generating roadmap: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.delete("/roadmap/{user_id}")
+async def clear_roadmap_cache(user_id: str):
+    """
+    Clear the roadmap cache for a specific user
+    """
+    try:
+        result = roadmaps_collection.delete_one({"user_id": user_id})
+        deleted = result.deleted_count > 0
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "cache_cleared": deleted
+        }
+    except Exception as e:
+        logger.error(f"Error clearing roadmap cache: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+# --- Error Handlers ---
+
+@app.exception_handler(404)
+async def not_found_exception_handler(request: Request, exc):
+    return JSONResponse(
+        status_code=404,
+        content={"success": False, "error": "Resource not found"}
+    )
+
+@app.exception_handler(500)
+async def server_exception_handler(request: Request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "error": "Internal server error"}
+    )
+
+# --- Server Startup ---
 if __name__ == "__main__":
+    import uvicorn
+    
+    # Get port from environment or use default
     port = int(os.environ.get("PORT", 8000))
+    
+    # Run the server
     uvicorn.run(app, host="0.0.0.0", port=port)
+    

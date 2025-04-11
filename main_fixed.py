@@ -1371,12 +1371,11 @@ async def create_recommendations(request: RecommendationRequest, background_task
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
 @app.post("/cache/generate/{user_id}")
 async def force_cache_generation(
     user_id: str, 
-    num_entries: int = Query(6, ge=1, le=20),
-    background_tasks: BackgroundTasks
+    background_tasks: BackgroundTasks,
+    num_entries: int = Query(6, ge=1, le=20)
 ):
     """
     Force cache generation for a user

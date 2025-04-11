@@ -92,13 +92,24 @@ def initialize_collections():
 # Initialize collections on startup
 initialize_collections()
 
-# NLP setup with robust fallback
+# Load NLP Model with vectors
 try:
     import spacy
-    nlp = spacy.blank("en")  # Use blank model, no need to download anything
-    print("Using blank spaCy model")
+    try:
+        # Try to load the medium model with vectors
+        nlp = spacy.load("en_core_web_md")
+        print("✅ NLP model with word vectors loaded successfully")
+    except:
+        try:
+            # Fallback to small model
+            nlp = spacy.load("en_core_web_sm")
+            print("⚠️ NLP model without word vectors loaded")
+        except:
+            # Last resort - blank model
+            nlp = spacy.blank("en")
+            print("⚠️ Using blank spaCy model - no vectors available")
 except ImportError:
-    # Create a dummy NLP class if spaCy isn't available
+    # Create a dummy NLP implementation if spaCy isn't available
     class DummyNLP:
         def __call__(self, text):
             return DummyDoc(text)
@@ -118,7 +129,7 @@ except ImportError:
             return intersection / union if union > 0 else 0.0
             
     nlp = DummyNLP()
-    print("Using dummy NLP implementation")
+    print("⚠️ Using dummy NLP implementation")
 # ✅ Cache Management Functions
 def get_user_cached_recommendations(user_id: str):
     """Get all cached recommendations for a user, sorted by sequence"""

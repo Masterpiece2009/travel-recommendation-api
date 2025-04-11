@@ -103,4 +103,4 @@ The API is deployed on Railway with proper database connection and error handlin
 ├── 📄 runtime.txt        # Specifies Python 3.10
 │
 └── 📄 README.md          # Documentation
-<hr> <div align="center"> <h3>🌟 Developed for improved travel recommendations and roadmap generation 🌟</h3> <p>© 2025 Travel AI Team</p> </div>
+<hr> <div align="center"> <h3>🌟 Developed for improved travel recommendations and roadmap generation 🌟</h3>  </div>

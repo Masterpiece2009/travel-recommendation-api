@@ -32,7 +32,7 @@ mongo_password = os.environ.get("MONGO_PASSWORD")
 if mongo_uri and mongo_password:
     mongo_uri = mongo_uri.replace("<db_password>", mongo_password)
     client = pymongo.MongoClient(mongo_uri)
-    db = client.travel_recommendations
+    db = client.travel_app
 else:
     raise ValueError("MongoDB URI or password not provided in environment variables")
 

@@ -1,0 +1,9 @@
+# In a new cell, create requirements.txt
+%%writefile requirements.txt
+fastapi==0.95.1
+uvicorn==0.22.0
+pymongo==4.3.3
+pydantic==1.10.7
+spacy==3.5.3
+scikit-learn==1.2.2
+nest-asyncio==1.5.6

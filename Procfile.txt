@@ -1,0 +1,3 @@
+# In a new cell, create a Procfile (for Railway to know how to start your app)
+%%writefile Procfile
+web: uvicorn main:app --host 0.0.0.0 --port $PORT

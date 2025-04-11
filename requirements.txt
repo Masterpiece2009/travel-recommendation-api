@@ -1,8 +1,10 @@
-fastapi>=0.100.0
+fastapi<0.100.0
 uvicorn>=0.22.0
 pymongo>=4.3.3
 nest-asyncio>=1.5.6
-scikit-learn>=1.0.0
-# Specify compatible versions
+scikit-learn>=1.0.0,<1.3.0
 pydantic<1.11.0,>=1.7.4
-spacy==3.5.3
+# Specify numpy version explicitly
+numpy==1.23.5
+# Use older spaCy version
+spacy==3.4.4

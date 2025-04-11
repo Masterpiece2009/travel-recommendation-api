@@ -47,12 +47,9 @@ The API is deployed on Railway with proper database connection and error handlin
 ├── 📄 runtime.txt        # Specifies Python 3.10
 └── 📄 README.md          # Documentation
 <hr style="height:1px;border-width:0;color:gray;background-color:gray"> <div align="center"> <h3>🌟 Developed for improved travel recommendations and roadmap generation 🌟</h3> <p>© 2025 Travel AI Team</p> </div>
-make irt more formatted ..there are texts in teh sma eline
 
-1 minute ago
-AA
 
-abdelrahmanaly3
+abdelrahmanaly
 Explore - Travel Recommendation API
 <div align="center"> <img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi" alt="FastAPI"/> <img src="https://img.shields.io/badge/MongoDB-4EA94B?style=for-the-badge&logo=mongodb&logoColor=white" alt="MongoDB"/> <img src="https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white" alt="Railway"/> <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"/> </div> <hr>
 📌 Overview

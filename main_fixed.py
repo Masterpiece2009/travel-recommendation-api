@@ -92,7 +92,7 @@ def initialize_collections():
 # Initialize collections on startup
 initialize_collections()
 
-# At the start of your file:
+# NLP setup with robust fallback
 try:
     import spacy
     nlp = spacy.blank("en")  # Use blank model, no need to download anything
@@ -119,7 +119,6 @@ except ImportError:
             
     nlp = DummyNLP()
     print("Using dummy NLP implementation")
-
 # ✅ Cache Management Functions
 def get_user_cached_recommendations(user_id: str):
     """Get all cached recommendations for a user, sorted by sequence"""

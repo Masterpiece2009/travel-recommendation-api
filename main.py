@@ -9,7 +9,6 @@ from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 import pymongo
-import spacy
 from sklearn.metrics.pairwise import cosine_similarity
 import nest_asyncio
 import uvicorn

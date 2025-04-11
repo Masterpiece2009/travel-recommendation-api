@@ -1,99 +1,62 @@
 # Explore - Travel Recommendation API
 
-## Overview
-Explore is a sophisticated travel recommendation API that delivers personalized place recommendations to users. Built with FastAPI, MongoDB, and natural language processing technologies, Explore provides tailored travel suggestions based on user preferences, search history, collaborative filtering, and trending analysis.
+Travel Recommendation API
+<p align="center"> <img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi" alt="FastAPI"/> <img src="https://img.shields.io/badge/MongoDB-4EA94B?style=for-the-badge&logo=mongodb&logoColor=white" alt="MongoDB"/> <img src="https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway&logoColor=white" alt="Railway"/> <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python"/> </p>
+📋 Overview
+This API provides sophisticated travel recommendations and roadmap generation using NLP and hybrid filtering algorithms.
 
-## Features
+🧠 Core Algorithms
+1️⃣ Recommendation Algorithm
+The recommendation system uses a hybrid approach that combines multiple scoring methods:
 
-### Core Functionality
-- **Personalized Recommendations**: Combines multiple factors to create customized travel suggestions
-- **Smart Caching**: Pre-computes and stores recommendation sets for faster response times
-- **Multi-factor Ranking**: Uses category matching, semantic search, ratings, likes, and user interactions
-- **Seamless Integration**: Simple RESTful API endpoints for easy integration with mobile and web applications
+Component	Weight	Description
+Category Matching	60%	Matches places based on user's preferred categories and tags
+Semantic Search	40%	Uses NLP to find places that match user interests semantically
+Rating Score	40%	Considers the rating of places from user reviews
+Likes Score	30%	Factors in popularity based on likes
+User Interactions	30%	Personalizes recommendations based on past interactions
+Caching Strategy
+⏱️ 6-hour TTL for cached recommendations
+🔄 Stores 7 recommendation responses per user
+🔍 Ensures new recommendations include both new places and places from recent requests
+🔧 Uses background tasks to generate cache entries asynchronously
+Key function: generate_final_recommendations()
 
-### Recommendation Algorithm
-Our recommendation engine uses a weighted approach combining:
-- **Category Matching (60%)**: Aligns recommendations with user's preferred travel categories
-- **Semantic Search (40%)**: Uses NLP to understand the meaning behind user preferences
-- **Rating Factors (40%)**: Incorporates place ratings for quality assurance
-- **Popularity Metrics (30%)**: Considers likes and user interactions for trending places
+2️⃣ Roadmap Generation Algorithm
+The roadmap generation uses a hybrid filtering approach with two phases:
 
-### Caching Strategy
-- **Performance Optimization**: Maintains 7 pre-computed recommendation sets per user
-- **TTL Management**: Cache entries expire after 6 hours to ensure freshness
-- **Automatic Replenishment**: Background processes monitor and refresh the cache
-- **Intelligent Composition**: New recommendations include fresh places followed by relevant places from recent requests
+Phase 1: Critical Filtering (Hard Constraints)
+📍 Location-based filtering to match user's preferred destinations
+✅ Ensures basic compatibility with user's core requirements
+Phase 2: Soft Constraint Scoring
+Constraint	Weight	Description
+Budget compatibility	30%	Matches places to user's budget level
+Accessibility needs	20%	Ensures places meet accessibility requirements
+Group type suitability	30%	Optimizes for family, solo, couples, etc.
+Seasonal relevance	20%	Considers time of year for recommendations
+Intelligent Caching
+🔄 Only regenerates roadmaps when user preferences change
+🔑 Uses a hash of user preferences to determine if regeneration is needed
+🗺️ Includes geographical distance calculations for optimizing travel routes
+Key function: generate_hybrid_roadmap()
 
-## API Endpoints
+🚀 API Features
+🔐 Secure MongoDB connection with environment variable configuration
+⚡ FastAPI endpoints with background task processing
+🔄 Fallback mechanisms for NLP functionality when spaCy models lack word vectors
+⏱️ Efficient caching strategies with TTL indices
+🌍 Geospatial awareness for location-based recommendations
+📦 Deployment
+The API is deployed on Railway with proper database connection and error handling.
 
-### Recommendation Endpoints
-- `GET /recommendations/{user_id}`: Retrieve personalized travel recommendations
-- `GET /recommendations/{user_id}/refresh`: Force refresh recommendations cache
-- `POST /recommendations/feedback`: Submit user feedback on recommendations
-
-### Cache Management
-- `GET /cache/status/{user_id}`: Check cache status for a specific user
-- `GET /cache/stats`: View overall cache statistics
-- `POST /cache/clear/{user_id}`: Clear cache for a specific user
-
-### System Health
-- `GET /health`: Check API health status
-- `GET /metrics`: Get system performance metrics
-
-## Technical Architecture
-
-### Backend
-- **FastAPI**: High-performance Python web framework
-- **MongoDB**: NoSQL database for storing user data, places, and cache
-- **NLP Processing**: Text analysis for semantic matching of places to preferences
-- **Async Processing**: Background tasks for cache maintenance
-
-### Deployment
-- **Railway Platform**: Cloud hosting with automatic scaling
-- **Environment Configuration**: Uses environment variables for flexible deployment
-- **Reliable Operations**: Deployed with safeguards and fallbacks
-
-## Getting Started
-
-### Prerequisites
-- Python 3.10
-- MongoDB instance
-- API credentials (for production use)
-
-### Installation
-1. Clone the repository
-```bash
-git clone https://github.com/yourusername/explore-api.git
-
-Install dependencies
-pip install -r requirements.txt
-Set up environment variables
-MONGO_URI=your_mongo_connection_string
-MONGO_PASSWORD=your_mongo_password
-Run the application
-python main_fixed.py
-Example Request
-curl -X GET "https://api.exploretravel.com/recommendations/user123"
-Example Response
-{
-  "recommendations": [
-    {
-      "place_id": "p12345",
-      "name": "Eiffel Tower",
-      "location": "Paris, France",
-      "category": "Landmarks",
-      "rating": 4.7,
-      "likes": 15420,
-      "description": "Iconic iron tower in Paris offering city views"
-    }
-  ],
-  "timestamp": "2025-04-11T05:45:32.123Z",
-  "cache_sequence": 15
-}
-Performance Metrics
-Response Time: Average <100ms with cache hits
-Cache Hit Rate: >90% for active users
-Recommendation Relevance: 85% user satisfaction rate
+📂 Project Structure
+│
+├── 📄 main.py            # Main application file with full functionality
+├── 📄 main_fixed.py      # Simplified version for deployment
+├── 📄 requirements.txt   # Dependencies including geopy
+├── 📄 runtime.txt        # Specifies Python 3.10
+└── 📄 README.md          # Documentation
+<p align="center"> <b>Developed for improved travel recommendations and roadmap generation</b><br> <small>© 2025 Travel AI Team</small> </p>
 Future Enhancements
 Integration with more external travel data sources
 Enhanced machine learning for better place matching

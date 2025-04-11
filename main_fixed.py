@@ -92,16 +92,33 @@ def initialize_collections():
 # Initialize collections on startup
 initialize_collections()
 
-# ✅ Load NLP Model
+# At the start of your file:
 try:
-    # Load smaller model suitable for Railway deployment
-    nlp = spacy.load("en_core_web_sm")
-    print("NLP model loaded successfully")
-except Exception as e:
-    print(f"Error loading NLP model: {e}")
-    # Create blank model as fallback
-    nlp = spacy.blank("en")
-    print("Using blank NLP model as fallback")
+    import spacy
+    nlp = spacy.blank("en")  # Use blank model, no need to download anything
+    print("Using blank spaCy model")
+except ImportError:
+    # Create a dummy NLP class if spaCy isn't available
+    class DummyNLP:
+        def __call__(self, text):
+            return DummyDoc(text)
+            
+    class DummyDoc:
+        def __init__(self, text):
+            self.text = text
+            
+        def similarity(self, other):
+            # Simple word overlap
+            words1 = set(self.text.lower().split())
+            words2 = set(other.text.lower().split())
+            if not words1 or not words2:
+                return 0.0
+            intersection = len(words1.intersection(words2))
+            union = len(words1.union(words2))
+            return intersection / union if union > 0 else 0.0
+            
+    nlp = DummyNLP()
+    print("Using dummy NLP implementation")
 
 # ✅ Cache Management Functions
 def get_user_cached_recommendations(user_id: str):

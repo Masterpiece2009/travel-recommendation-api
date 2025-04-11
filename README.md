@@ -50,7 +50,7 @@ The API is deployed on Railway with proper database connection and error handlin
 
 
 abdelrahmanaly
-Explore - Travel Recommendation API
+ - Travel Recommendation API
 <hr>
 📌 Overview
 This API provides sophisticated travel recommendations and roadmap generation using NLP and hybrid filtering algorithms.

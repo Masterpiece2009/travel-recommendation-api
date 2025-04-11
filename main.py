@@ -14,8 +14,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 import nest_asyncio
 import uvicorn
 
-# Load spaCy model
-nlp = spacy.load("en_core_web_sm")
 
 # Enable nested asyncio for background tasks
 nest_asyncio.apply()
@@ -310,6 +308,7 @@ async def clear_user_cache(user_id: str):
         "shown_places_reset": True
     }
 
+# Replace:
 @app.get("/search/{user_id}")
 async def search_user(
     user_id: str,
@@ -320,22 +319,32 @@ async def search_user(
     # Process the query with spaCy
     query_doc = nlp(query)
     
+    # ... rest of the function ...
+
+@app.get("/search/{user_id}")
+async def search_user(
+    user_id: str,
+    query: str = Query(..., min_length=1),
+    limit: int = Query(10, ge=1, le=50)
+):
+    """Search for places with keyword matching"""
+    query_lower = query.lower()
+    
     # Get all places
     places = list(db.places.find({}))
     
-    # Score places based on semantic similarity
+    # Score places based on keyword matching
     scored_places = []
     for place in places:
-        # Create spaCy docs for place fields
-        name_doc = nlp(place.get("name", ""))
-        desc_doc = nlp(place.get("description", ""))
+        name = place.get("name", "").lower()
+        desc = place.get("description", "").lower()
         
-        # Calculate similarities
-        name_sim = query_doc.similarity(name_doc) if name_doc.vector_norm else 0
-        desc_sim = query_doc.similarity(desc_doc) if desc_doc.vector_norm else 0
+        # Calculate basic text matching score
+        name_score = 1.0 if query_lower in name else 0.0
+        desc_score = 0.5 if query_lower in desc else 0.0
         
         # Combined score
-        score = (name_sim * 0.7) + (desc_sim * 0.3)
+        score = name_score + desc_score
         
         scored_places.append({
             "place_id": place["place_id"],

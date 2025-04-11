@@ -23,11 +23,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ✅ Securely Connect to MongoDB
-password = os.environ.get("MONGO_PASSWORD", "cmCqBjtQCQDWbvlo")  # Fallback for development
+password = os.environ.get("MONGO_PASSWORD", "master2002_B*")  # Fallback for development
 encoded_password = urllib.parse.quote_plus(password)
 
-MONGO_URI = f"mongodb+srv://shehabwww153:{encoded_password}@userauth.rvtb5.mongodb.net/travel_app?retryWrites=true&w=majority&appName=userAuth"
-
+MONGO_URI = f"mongodb+srv://abdelrahman:{encoded_password}@cluster0.goxvb.mongodb.net/travel_app?retryWrites=true&w=majority&appName=Cluster0"
 def connect_mongo(uri, retries=3):
     """Attempts to connect to MongoDB with retry logic."""
     for attempt in range(retries):

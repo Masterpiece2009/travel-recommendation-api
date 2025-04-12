@@ -1504,6 +1504,7 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
     """
     Generate final personalized recommendations for a user.
     Enhanced with collaborative filtering (40% of recommendations) and explicit tracking of shown places.
+    Implements advanced fallback mechanisms with randomized mixing when running out of new places.
     
     Args:
         user_id: User ID
@@ -1514,7 +1515,7 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
         List of personalized recommendations
     """
     try:
-        logger.info(f"Generating final recommendations for user {user_id}")
+        logger.info(f"Generating final recommendations for user {user_id}, need {num_recommendations}")
         
         # Get user preferences
         user_prefs = get_user_travel_preferences(user_id)
@@ -1597,110 +1598,130 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
             
             logger.info(f"Added {added_content_places} content-based places")
         
-        # PART 4: FALLBACK 1 - Discovery places if we still need more
+        # PART 4: FALLBACK OPTIONS - Prepare all potential fallback sources
+        # If we still need more recommendations, prepare fallback options
         if len(recommendations) < num_recommendations:
             remaining_needed = num_recommendations - len(recommendations)
-            logger.info(f"Need {remaining_needed} more recommendations, adding discovery places")
+            logger.info(f"Need {remaining_needed} more recommendations, preparing fallback options")
             
-            discovery_places = get_discovery_places(user_id, limit=remaining_needed * 2)  # Get extra for filtering
-            
-            # Filter out already shown/added places
-            filtered_discoveries = []
-            for place in discovery_places:
-                if place["_id"] not in previously_shown_ids and place["_id"] not in [r["_id"] for r in recommendations]:
-                    filtered_discoveries.append(place)
-            
-            added_discovery_places = 0
-            for place in filtered_discoveries[:remaining_needed]:
-                place["source"] = "discovery"
-                recommendations.append(place)
-                added_discovery_places += 1
-            
-            logger.info(f"Added {added_discovery_places} discovery places")
-        
-        # PART 5: FALLBACK 2 - Trending places based on recent interactions
-        if len(recommendations) < num_recommendations:
-            remaining_needed = num_recommendations - len(recommendations)
-            logger.info(f"Need {remaining_needed} more recommendations, adding trending places")
-            
-            # Get recent interactions to find trending places
-            recent_date = datetime.now() - timedelta(days=7)
-            trending_interactions = list(interactions_collection.aggregate([
-                {"$match": {"timestamp": {"$gte": recent_date}}},
-                {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
-                {"$sort": {"count": -1}},
-                {"$limit": remaining_needed * 2}
-            ]))
-            
-            trending_place_ids = [item["_id"] for item in trending_interactions]
-            
-            # Filter out already shown places
-            trending_place_ids = [pid for pid in trending_place_ids 
-                                if pid not in previously_shown_ids and 
-                                   pid not in [r["_id"] for r in recommendations]]
-            
-            # Get place details
-            if trending_place_ids:
-                trending_places = list(places_collection.find({"_id": {"$in": trending_place_ids}}))
-                
-                added_trending_places = 0
-                for place in trending_places[:remaining_needed]:
-                    place["source"] = "trending"
-                    recommendations.append(place)
-                    added_trending_places += 1
-                
-                logger.info(f"Added {added_trending_places} trending places")
-        
-        # PART 6: FINAL FALLBACK - Reuse previously shown places if we have no choice
-        if len(recommendations) < num_recommendations and previously_shown_ids:
-            remaining_needed = num_recommendations - len(recommendations)
-            logger.info(f"Need {remaining_needed} more recommendations, reusing previously shown places")
-            
-            # Sort previously shown by recency (oldest first) to prioritize less recently shown places
-            previously_shown_place_ids = previously_shown_ids.copy()
-            
-            # Filter out places already in recommendations
+            # Keep track of IDs we've already included
             current_rec_ids = [r["_id"] for r in recommendations]
-            previously_shown_place_ids = [pid for pid in previously_shown_place_ids if pid not in current_rec_ids]
             
-            # Reverse to prioritize older places (beginning of the list) that haven't been seen recently
-            previously_shown_place_ids.reverse()
+            # FALLBACK SOURCE 1: Discovery places
+            discovery_places = []
+            try:
+                raw_discovery = get_discovery_places(user_id, limit=remaining_needed * 2)
+                for place in raw_discovery:
+                    if place["_id"] not in previously_shown_ids and place["_id"] not in current_rec_ids:
+                        place["source"] = "discovery"
+                        discovery_places.append(place)
+            except Exception as e:
+                logger.error(f"Error getting discovery places: {str(e)}")
             
-            # Get place details
-            if previously_shown_place_ids:
-                reuse_places = list(places_collection.find(
-                    {"_id": {"$in": previously_shown_place_ids[:remaining_needed]}}
-                ))
+            # FALLBACK SOURCE 2: Trending places
+            trending_places = []
+            try:
+                # Get recent interactions to find trending places
+                recent_date = datetime.now() - timedelta(days=7)
+                trending_interactions = list(interactions_collection.aggregate([
+                    {"$match": {"timestamp": {"$gte": recent_date}}},
+                    {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                    {"$limit": remaining_needed * 2}
+                ]))
                 
-                added_reuse_places = 0
-                for place in reuse_places:
-                    place["source"] = "reused"
+                trending_place_ids = [item["_id"] for item in trending_interactions]
+                trending_place_ids = [pid for pid in trending_place_ids 
+                                    if pid not in previously_shown_ids and 
+                                       pid not in current_rec_ids]
+                
+                if trending_place_ids:
+                    raw_trending = list(places_collection.find({"_id": {"$in": trending_place_ids}}))
+                    for place in raw_trending:
+                        place["source"] = "trending"
+                        trending_places.append(place)
+            except Exception as e:
+                logger.error(f"Error getting trending places: {str(e)}")
+            
+            # FALLBACK SOURCE 3: Old previously shown places (user likely forgot)
+            old_shown_places = []
+            try:
+                if previously_shown_ids and len(previously_shown_ids) > 20:
+                    # Get places from beginning of history (oldest ones user likely forgot)
+                    # Use the first 30% of the history
+                    oldest_count = min(int(len(previously_shown_ids) * 0.3), remaining_needed * 2)
+                    oldest_ids = previously_shown_ids[:oldest_count]
+                    
+                    # Filter out IDs already in recommendations
+                    oldest_ids = [pid for pid in oldest_ids if pid not in current_rec_ids]
+                    
+                    if oldest_ids:
+                        raw_old_places = list(places_collection.find({"_id": {"$in": oldest_ids}}))
+                        for place in raw_old_places:
+                            place["source"] = "rediscovery"
+                            old_shown_places.append(place)
+            except Exception as e:
+                logger.error(f"Error getting old shown places: {str(e)}")
+            
+            # FALLBACK SOURCE 4: Any top-rated places as last resort
+            top_rated_places = []
+            try:
+                # Get top-rated places not already included
+                raw_top_rated = list(places_collection.find(
+                    {"_id": {"$nin": current_rec_ids + previously_shown_ids}}
+                ).sort("average_rating", -1).limit(remaining_needed))
+                
+                for place in raw_top_rated:
+                    place["source"] = "top_rated"
+                    top_rated_places.append(place)
+            except Exception as e:
+                logger.error(f"Error getting top-rated places: {str(e)}")
+            
+            # PART 5: COMBINE FALLBACK SOURCES - Mix randomly to avoid patterns
+            # Combine all fallback options
+            all_fallbacks = discovery_places + trending_places + old_shown_places + top_rated_places
+            
+            # Shuffle to randomize selection (avoid sequential patterns)
+            random.shuffle(all_fallbacks)
+            
+            # Remove any duplicates by ID
+            seen_ids = set(current_rec_ids)
+            unique_fallbacks = []
+            for place in all_fallbacks:
+                if place["_id"] not in seen_ids:
+                    seen_ids.add(place["_id"])
+                    unique_fallbacks.append(place)
+            
+            # Add fallbacks until we reach target count
+            added_fallback_count = 0
+            for place in unique_fallbacks:
+                if len(recommendations) < num_recommendations:
                     recommendations.append(place)
-                    added_reuse_places += 1
-                
-                logger.info(f"Added {added_reuse_places} reused places")
+                    added_fallback_count += 1
+                else:
+                    break
+            
+            logger.info(f"Added {added_fallback_count} mixed fallback recommendations")
         
-        # PART 7: ABSOLUTE LAST RESORT - Any places at all
+        # PART 6: ABSOLUTE LAST RESORT - Reuse any places if we still need more
         if len(recommendations) < num_recommendations:
             remaining_needed = num_recommendations - len(recommendations)
-            logger.info(f"Need {remaining_needed} more recommendations, adding any available places")
+            logger.info(f"Still need {remaining_needed} more places, using any available places")
             
-            # Exclude places already in recommendations
+            # Get any places excluding what we've already added
             current_rec_ids = [r["_id"] for r in recommendations]
             last_resort_places = list(places_collection.find(
                 {"_id": {"$nin": current_rec_ids}}
             ).sort("average_rating", -1).limit(remaining_needed))
             
-            added_fallback_places = 0
             for place in last_resort_places:
-                place["source"] = "fallback"
+                place["source"] = "last_resort"
                 recommendations.append(place)
-                added_fallback_places += 1
             
-            logger.info(f"Added {added_fallback_places} fallback places")
+            logger.info(f"Added {len(last_resort_places)} last resort places")
         
-        logger.info(f"Generated {len(recommendations)} total recommendations for user {user_id}")
-        return recommendations
+        logger.info(f"Final recommendation count: {len(recommendations)}/{num_recommendations}")
+        return recommendations[:num_recommendations]
     
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")

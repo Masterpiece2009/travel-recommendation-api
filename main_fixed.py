@@ -63,32 +63,58 @@ except Exception as e:
     logger.error(f"Error creating TTL index on roadmaps collection: {e}")
     
 # --- Initialize spaCy model ---
-def load_spacy_model(model="en_core_web_md", retries=2):
-"""Attempts to load the spaCy model, downloading it if necessary."""
-for attempt in range(retries):
-try:
-return spacy.load(model)
-except Exception as e:
-logger.error(f"❌ Error loading NLP model (Attempt {attempt + 1}/{retries}): {e}")
-try:
-spacy.cli.download(model)
-except Exception as download_err:
-logger.error(f"Failed to download model: {download_err}")
+def load_spacy_model(model="en_core_web_md", retries=2):  # Changed default to md model
+    """Attempts to load the spaCy model, downloading it if necessary."""
+    logger.info(f"🔄 Attempting to load spaCy model: {model}")
+    
+    for attempt in range(retries):
+        try:
+            nlp = spacy.load(model)
+            logger.info(f"✅ Successfully loaded spaCy model: {model}")
+            return nlp
+        except Exception as e:
+            logger.error(f"❌ Error loading NLP model (Attempt {attempt + 1}/{retries}): {e}")
+            try:
+                logger.info(f"📥 Downloading spaCy model: {model}")
+                # Use python -m approach which is more reliable in some environments
+                import subprocess
+                result = subprocess.run([sys.executable, "-m", "spacy", "download", model], 
+                                       capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info(f"✅ Successfully downloaded model: {model}")
+                else:
+                    logger.error(f"❌ Failed to download model: {result.stderr}")
+            except Exception as download_err:
+                logger.error(f"❌ Failed to download model: {download_err}")
 
-# Return dummy NLP object as fallback
-class DummyNLP:
-    def __call__(self, text):
-        class DummyDoc:
-            def __init__(self, text):
-                self.text = text
-                self.vector = [0] * 300  # Empty vector
-        return DummyDoc(text)
-logger.warning("Using dummy NLP model as fallback!")
-return DummyNLP()
+    # Return dummy NLP object as fallback
+    class DummyNLP:
+        def __init__(self):
+            self.name = "DummyNLP-Fallback"
+            
+        def __call__(self, text):
+            class DummyDoc:
+                def __init__(self, text):
+                    self.text = text
+                    self.vector = [0] * 300  # Empty vector
+            return DummyDoc(text)
+    
+    logger.warning("⚠️ CRITICAL: Using dummy NLP model as fallback! Semantic search will NOT work properly.")
+    return DummyNLP()
+
+# Try to load the model with word vectors
 nlp = load_spacy_model()
-logger.info("✅ NLP Model Loaded!")
 
-# Initialize FastAPI
+# Check if model has word vectors
+test_text = "travel"
+test_doc = nlp(test_text)
+has_vectors = not all(v == 0 for v in test_doc.vector)
+
+if has_vectors:
+    logger.info("✅ NLP Model loaded with WORD VECTORS - semantic search will work properly")
+else:
+    logger.warning("⚠️ NLP Model doesn't have word vectors - semantic search will be LIMITED")
+
 app = FastAPI(
     title="Travel API",
     description="API for travel recommendations and roadmaps",

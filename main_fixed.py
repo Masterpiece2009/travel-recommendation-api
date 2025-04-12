@@ -527,6 +527,8 @@ def get_candidate_places(user_preferences, user_id, size=30):
     Returns:
         List of candidate places
     """
+    logger.info(f"Finding candidate places for user {user_id}")
+    
     if not user_preferences:
         logger.warning(f"No user preferences found for user {user_id}, returning popular places")
         return list(places_collection.find().sort([("average_rating", -1)]).limit(size))
@@ -536,102 +538,240 @@ def get_candidate_places(user_preferences, user_id, size=30):
     preferred_tags = user_preferences.get("preferred_tags", [])
     
     # --- PART 1: CATEGORY AND TAG MATCHING (60%) ---
-    query = {"$or": []}
+    # Instead of relying solely on MongoDB query, we'll score matches manually
+    all_places = list(places_collection.find())
+    scored_category_tag_places = []
     
-    # Add category filter if we have preferred categories
-    if preferred_categories:
-        query["$or"].append({"category": {"$in": preferred_categories}})
+    for place in all_places:
+        score = 0.0
+        place_category = place.get("category", "")
+        place_tags = place.get("tags", []) if isinstance(place.get("tags"), list) else []
+        
+        # 1. Category matching (70% weight)
+        if place_category and place_category in preferred_categories:
+            score += 0.7
+            logger.debug(f"Category match for place {place.get('name')}: {place_category}")
+        
+        # 2. Tag matching (up to 60% weight)
+        matching_tags = [tag for tag in place_tags if tag in preferred_tags]
+        if matching_tags:
+            # Base score of 0.3 for any tag match, plus up to 0.3 more based on % of tags matched
+            tag_ratio = len(matching_tags) / (len(preferred_tags) or 1)  # Avoid division by zero
+            tag_score = min(0.6, 0.3 + (0.3 * tag_ratio))  # Cap at 0.6
+            score += tag_score
+            logger.debug(f"Tag matches for place {place.get('name')}: {matching_tags}, score: {tag_score:.2f}")
+        
+        # Only consider if there's any match
+        if score > 0:
+            scored_category_tag_places.append((place, score))
     
-    # Add tags filter if we have preferred tags
-    if preferred_tags:
-        query["$or"].append({"tags": {"$in": preferred_tags}})
+    # Sort by score descending
+    scored_category_tag_places.sort(key=lambda x: x[1], reverse=True)
+    category_tag_places = [place for place, _ in scored_category_tag_places]
     
-    # If we have no preferences to query on, return popular places
-    if not query["$or"]:
-        logger.info(f"No category or tag preferences for user {user_id}, using popularity")
-        return list(places_collection.find().sort([("average_rating", -1)]).limit(size))
-    
-    # Get places matching categories or tags
-    category_tag_places = list(places_collection.find(query).limit(size))
-    logger.info(f"Found {len(category_tag_places)} places matching categories/tags for user {user_id}")
+    logger.info(f"Found {len(category_tag_places)} places with direct category/tag matching for user {user_id}")
     
     # --- PART 2: SEMANTIC SEARCH BASED ON RECENT QUERIES (40%) ---
-    # Check if NLP model has word vectors
-    test_doc = nlp("test")
-    has_vectors = hasattr(test_doc, 'vector_norm') and test_doc.vector_norm > 0
-    
     semantic_places = []
-    if has_vectors:
-        try:
-            # Fetch recent search queries for this user
-            search_queries = list(search_queries_collection.find(
-                {"user_id": user_id}
-            ).sort("timestamp", -1).limit(5))
-            
-            # Extract keywords from search queries
-            search_keywords = set()
-            for query_doc in search_queries:
+    
+    # Check if NLP is available with more robust verification
+    nlp_available = False
+    fallback_level = 0
+    
+    try:
+        # Level 1: Check if nlp exists and has vectors
+        if nlp and not isinstance(nlp, DummyNLP):
+            test_doc = nlp("test")
+            if hasattr(test_doc, 'vector_norm') and test_doc.vector_norm > 0:
+                nlp_available = True
+                logger.info("Using full spaCy NLP with word vectors")
+            else:
+                fallback_level = 1
+                logger.warning("spaCy available but word vectors missing, using fallback level 1")
+        else:
+            fallback_level = 2
+            logger.warning("spaCy not available, using fallback level 2")
+    except Exception as e:
+        fallback_level = 3
+        logger.error(f"Error checking NLP availability: {e}, using fallback level 3")
+    
+    try:
+        # Fetch recent search queries for this user
+        search_queries = list(search_queries_collection.find(
+            {"user_id": user_id}
+        ).sort("timestamp", -1).limit(5))
+        
+        # Extract keywords from search queries with appropriate fallbacks
+        search_keywords = set()
+        
+        for query_doc in search_queries:
+            # Use existing keywords if available
+            if "keywords" in query_doc and query_doc["keywords"]:
+                for keyword in query_doc["keywords"]:
+                    if keyword and len(keyword) > 2:
+                        search_keywords.add(keyword.lower())
+            else:
                 query_text = query_doc.get("query", "")
-                if query_text:
-                    # Simple keyword extraction
+                if not query_text:
+                    continue
+                
+                # Different keyword extraction based on fallback level
+                if fallback_level == 0:
+                    # Full NLP with POS tagging
+                    doc = nlp(query_text.lower())
+                    for token in doc:
+                        if token.pos_ in ["NOUN", "PROPN", "ADJ"] and not token.is_stop and len(token.text) > 2:
+                            search_keywords.add(token.text)
+                elif fallback_level == 1:
+                    # spaCy available but no vectors - use basic POS if available, otherwise tokenize
+                    try:
+                        doc = nlp(query_text.lower())
+                        for token in doc:
+                            if not token.is_stop and len(token.text) > 2:
+                                search_keywords.add(token.text)
+                    except:
+                        # Tokenize and filter stopwords
+                        stopwords = {'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by'}
+                        for word in query_text.lower().split():
+                            if word not in stopwords and len(word) > 2:
+                                search_keywords.add(word)
+                else:
+                    # Basic tokenization for levels 2 and 3
                     stopwords = {'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by'}
-                    keywords = [word.lower() for word in query_text.split() if word.lower() not in stopwords]
-                    for keyword in keywords:
-                        if len(keyword) > 2:  # Skip very short words
-                            search_keywords.add(keyword)
+                    for word in query_text.lower().split():
+                        if word not in stopwords and len(word) > 2:
+                            search_keywords.add(word)
+        
+        search_keywords_list = list(search_keywords)  # Convert to list for consistent ordering
+        logger.info(f"Extracted {len(search_keywords_list)} search keywords for user {user_id}")
+        
+        if search_keywords_list:
+            # Calculate semantic similarity scores based on fallback level
+            scored_semantic_places = []
             
-            logger.info(f"Extracted {len(search_keywords)} search keywords for user {user_id}")
-            
-            if search_keywords:
-                # Get all places for semantic matching
-                all_places = list(places_collection.find())
-                
-                # Calculate semantic similarity scores
-                keyword_place_scores = {}
-                match_count = 0
-                
-                for keyword in search_keywords:
-                    keyword_doc = nlp(keyword.lower())
+            # Fallback level determines matching approach
+            if fallback_level == 0:
+                # Full semantic matching with spaCy word vectors
+                for place in all_places:
+                    place_id = place["_id"]
                     
-                    for place in all_places:
-                        place_id = place["_id"]
-                        
-                        if place_id not in keyword_place_scores:
-                            keyword_place_scores[place_id] = 0
+                    # Skip if place is already highly ranked in category/tag matches
+                    if place in category_tag_places[:int(size * 0.3)]:
+                        continue
+                    
+                    # Initialize scoring components
+                    tag_similarity = 0.0
+                    tag_match_count = 0
+                    description_similarity = 0.0
+                    description_match_count = 0
+                    
+                    # Get place data
+                    tags = place.get("tags", [])
+                    description = place.get("description", "")
+                    
+                    # Process tags with nlp
+                    for keyword in search_keywords_list:
+                        keyword_doc = nlp(keyword.lower())
                         
                         # Check each tag for similarity
-                        if "tags" in place and isinstance(place["tags"], list):
-                            for tag in place["tags"]:
+                        for tag in tags:
+                            try:
                                 tag_doc = nlp(tag.lower())
                                 similarity = keyword_doc.similarity(tag_doc)
                                 
-                                # Add score if similarity is above threshold
+                                # Count significant matches
                                 if similarity > 0.6:  # Threshold for semantic match
-                                    keyword_place_scores[place_id] += similarity
-                                    match_count += 1
-                
-                logger.info(f"Found {match_count} semantic matches above threshold 0.6 for user {user_id}")
-                
-                # Get top matching places
-                semantic_matches = [(place_id, score) for place_id, score in keyword_place_scores.items() if score > 0]
-                semantic_matches.sort(key=lambda x: x[1], reverse=True)
-                
-                # Get the actual place documents
-                if semantic_matches:
-                    matched_ids = [match[0] for match in semantic_matches[:size]]
-                    semantic_places = list(places_collection.find({"_id": {"$in": matched_ids}}))
+                                    tag_similarity += similarity
+                                    tag_match_count += 1
+                            except Exception as e:
+                                continue  # Skip this tag if error
+                        
+                        # Process description with nlp
+                        if description:
+                            try:
+                                # Process full description
+                                desc_doc = nlp(description.lower())
+                                
+                                # Check semantic similarity
+                                similarity = keyword_doc.similarity(desc_doc)
+                                
+                                # Check exact keyword match in description (bonus)
+                                if keyword.lower() in description.lower():
+                                    description_similarity += max(similarity, 0.7)  # At least 0.7 for exact match
+                                    description_match_count += 1
+                                elif similarity > 0.5:  # Lower threshold for description
+                                    description_similarity += similarity
+                                    description_match_count += 1
+                            except Exception as e:
+                                logger.debug(f"Error comparing description: {str(e)}")
                     
-                    # Sort them by score
-                    id_to_place = {place["_id"]: place for place in semantic_places}
-                    semantic_places = [id_to_place[match_id] for match_id, _ in semantic_matches 
-                                      if match_id in id_to_place]
+                    # Calculate final semantic score
+                    semantic_score = 0.0
                     
-                    logger.info(f"Found {len(semantic_places)} places via semantic search for user {user_id}")
-        except Exception as e:
-            logger.error(f"Error in semantic search: {e}")
-            # If semantic search fails, we'll just use the category/tag results
-    else:
-        logger.warning("Word vectors not available, skipping semantic search")
+                    # Tag component (60% weight)
+                    tag_component = 0.0
+                    if tag_match_count > 0:
+                        tag_component = (tag_similarity / tag_match_count) * 0.6
+                    
+                    # Description component (40% weight)
+                    desc_component = 0.0
+                    if description_match_count > 0:
+                        desc_component = (description_similarity / description_match_count) * 0.4
+                    
+                    # Combined score
+                    semantic_score = tag_component + desc_component
+                    
+                    # Only include if score is significant
+                    if semantic_score > 0.3:
+                        scored_semantic_places.append((place, semantic_score))
+            else:
+                # Text-based fallback matching (for fallback levels 1-3)
+                for place in all_places:
+                    # Skip if place is already highly ranked in category/tag matches
+                    if place in category_tag_places[:int(size * 0.3)]:
+                        continue
+                    
+                    match_score = 0.0
+                    tags = place.get("tags", [])
+                    description = place.get("description", "")
+                    
+                    # Tag matching (60% weight)
+                    tag_matches = 0
+                    for keyword in search_keywords_list:
+                        for tag in tags:
+                            # Exact or partial match
+                            if keyword.lower() in tag.lower() or tag.lower() in keyword.lower():
+                                tag_matches += 1
+                                break
+                    
+                    if tag_matches > 0:
+                        # Scale by ratio of matched keywords
+                        tag_score = min(1.0, tag_matches / len(search_keywords_list))
+                        match_score += tag_score * 0.6  # 60% weight
+                    
+                    # Description matching (40% weight)
+                    if description:
+                        desc_matches = 0
+                        for keyword in search_keywords_list:
+                            if keyword.lower() in description.lower():
+                                desc_matches += 1
+                        
+                        if desc_matches > 0:
+                            # Scale by ratio of matched keywords
+                            desc_score = min(1.0, desc_matches / len(search_keywords_list))
+                            match_score += desc_score * 0.4  # 40% weight
+                    
+                    if match_score > 0.2:  # Lower threshold for text matching
+                        scored_semantic_places.append((place, match_score))
+            
+            # Sort by score
+            scored_semantic_places.sort(key=lambda x: x[1], reverse=True)
+            semantic_places = [place for place, _ in scored_semantic_places]
+            logger.info(f"Found {len(semantic_places)} places via search keywords (fallback level: {fallback_level})")
+        
+    except Exception as e:
+        logger.error(f"Error in semantic search: {e}")
+        # If semantic search fails, we'll just use the category/tag results
     
     # --- PART 3: COMBINE RESULTS ---
     # Calculate counts for each source
@@ -656,7 +796,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
             candidate_places.append(place)
             added_ids.add(place_id)
     
-    # If we don't have enough candidates, add some random places
+    # If we don't have enough candidates, add some top-rated places
     if len(candidate_places) < size:
         additional_places = list(
             places_collection.find({"_id": {"$nin": list(added_ids)}})
@@ -664,11 +804,10 @@ def get_candidate_places(user_preferences, user_id, size=30):
             .limit(size - len(candidate_places))
         )
         candidate_places.extend(additional_places)
-        logger.info(f"Added {len(additional_places)} additional places to reach target size")
+        logger.info(f"Added {len(additional_places)} additional places based on popularity")
     
     logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
     return candidate_places
-
 def rank_places(candidate_places, user_id):
     """
     Rank places based on user engagement and popularity metrics.

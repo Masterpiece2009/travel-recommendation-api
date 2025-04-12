@@ -515,7 +515,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
     Enhanced with improved semantic search for matching places to user preferences.
     
     Args:
-        user_preferences: Dictionary containing user preferences
+        user_preferences: Dictionary containing user information with preferences
         user_id: User ID for fetching search history and interactions
         size: Maximum number of candidate places to return
         
@@ -524,24 +524,16 @@ def get_candidate_places(user_preferences, user_id, size=30):
     """
     logger.info(f"Finding candidate places for user {user_id}")
     
-    # FIXED: Extract user preferences from correct structure
-    # Check both possible structures to make the function more robust
-    if user_preferences:
-        # Try to get from both possible structures
-        preferred_categories = (
-            user_preferences.get("categories", []) or  # Try the actual structure in DB
-            user_preferences.get("preferred_categories", [])  # Try the old expected structure
-        )
-        
-        preferred_tags = (
-            user_preferences.get("tags", []) or  # Try the actual structure in DB
-            user_preferences.get("preferred_tags", [])  # Try the old expected structure
-        )
+    # FIXED: Extract user preferences from the correct nested structure
+    if user_preferences and "preferences" in user_preferences:
+        # Access the nested preferences object
+        preferences_obj = user_preferences.get("preferences", {})
+        preferred_categories = preferences_obj.get("categories", [])
+        preferred_tags = preferences_obj.get("tags", [])
     else:
-        # If user_preferences is None/empty, use empty lists
+        # If user_preferences is None/empty or doesn't have preferences, use empty lists
         preferred_categories = []
         preferred_tags = []
-    
     # Log preferences with the correct structure
     logger.info(f"User preferences - Categories: {preferred_categories}, Tags: {preferred_tags}")
     

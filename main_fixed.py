@@ -974,7 +974,95 @@ def get_discovery_places(user_id, limit=10):
     except Exception as e:
         logger.error(f"Error getting discovery places: {str(e)}")
         return []
-
+def calculate_personalization_score(place, user_id, user_prefs):
+    """
+    Calculate personalization score for a place based on user preferences.
+    
+    Scoring components:
+    - Category match (40%): Direct match (1.0) or partial/substring match (0.7)
+    - Tag match (30%): Proportional to number of matching tags
+    - Rating factor (20%): Normalized place rating (0-5 scale)
+    - User interaction history (10%): Based on previous positive interactions or dislikes
+    
+    The final score is weighted: (category*0.4 + tags*0.3 + rating*0.2 + interactions*0.1)
+    
+    Args:
+        place: Place document
+        user_id: User ID
+        user_prefs: User preferences dictionary
+        
+    Returns:
+        Personalization score between 0 and 1
+    """
+    try:
+        # 1. Category matching (40% of score)
+        category_score = 0
+        place_category = place.get("category", "").lower()
+        preferred_categories = [cat.lower() for cat in user_prefs.get("preferred_categories", [])]
+        
+        if preferred_categories:
+            # Direct category match
+            if place_category in preferred_categories:
+                category_score = 1.0
+            else:
+                # Check for partial matches (e.g., "beach resort" contains "beach")
+                for category in preferred_categories:
+                    if category in place_category or place_category in category:
+                        category_score = 0.7
+                        break
+        else:
+            # No preferred categories, neutral score
+            category_score = 0.5
+            
+        # 2. Tag matching (30% of score)
+        tag_score = 0
+        place_tags = [tag.lower() for tag in place.get("tags", [])]
+        preferred_tags = [tag.lower() for tag in user_prefs.get("preferred_tags", [])]
+        
+        if preferred_tags and place_tags:
+            matching_tags = set(place_tags).intersection(set(preferred_tags))
+            tag_score = len(matching_tags) / max(len(preferred_tags), 1)
+        else:
+            # No tags to compare, neutral score
+            tag_score = 0.5
+            
+        # 3. Rating factor (20% of score)
+        rating_score = min(place.get("rating", 0) / 5.0, 1.0)  # Normalize to 0-1
+            
+        # 4. User interaction history (10% of score)
+        interaction_score = 0.5  # Default neutral score
+        
+        # Look up past interactions
+        past_interactions = interactions_collection.find_one({
+            "user_id": user_id,
+            "place_id": place["_id"]
+        })
+        
+        if past_interactions:
+            # Positive interactions increase score
+            if past_interactions.get("liked", False):
+                interaction_score = 0.9
+            elif past_interactions.get("saved", False):
+                interaction_score = 0.8
+            elif past_interactions.get("viewed", 0) > 3:
+                interaction_score = 0.7
+            # Negative interactions decrease score
+            elif past_interactions.get("disliked", False):
+                interaction_score = 0.1
+        
+        # Calculate final weighted score
+        final_score = (
+            (category_score * 0.4) +
+            (tag_score * 0.3) +
+            (rating_score * 0.2) +
+            (interaction_score * 0.1)
+        )
+        
+        return final_score
+        
+    except Exception as e:
+        logger.error(f"Error calculating personalization score: {e}")
+        return 0.5  # Return neutral score on error
 
 def rank_places(candidate_places, user_id):
     """

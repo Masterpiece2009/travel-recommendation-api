@@ -808,6 +808,163 @@ def get_candidate_places(user_preferences, user_id, size=30):
     
     logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
     return candidate_places
+
+def get_collaborative_recommendations(user_id):
+    """Get places from similar users based on various interactions"""
+    try:
+        logger.info(f"Finding collaborative recommendations for user {user_id}")
+        user = users_collection.find_one({"_id": user_id})
+        if not user:
+            logger.warning(f"User {user_id} not found")
+            return []
+
+        # Get user preferences
+        user_prefs = user.get("preferences", {})
+        preferred_categories = user_prefs.get("preferred_categories", [])
+        preferred_tags = user_prefs.get("preferred_tags", [])
+
+        # Find similar users
+        similar_users = list(users_collection.find({
+            "preferences.preferred_categories": {"$in": preferred_categories},
+            "preferences.preferred_tags": {"$in": preferred_tags},
+            "_id": {"$ne": user_id}
+        }))
+
+        logger.info(f"Found {len(similar_users)} similar users for user {user_id}")
+
+        # Define weights for different interaction types
+        action_weights = {
+            "like": 5,
+            "save": 4,
+            "share": 3,
+            "comment": 3,
+            "view": 2,
+            "click": 1,
+            "dislike": -5
+        }
+
+        # Get current time consistently as timezone-naive
+        current_date = datetime.now().replace(tzinfo=None).date()
+
+        # Time decay factor for older interactions - IMPROVED DATETIME HANDLING
+        def apply_time_decay(weight, interaction_time):
+            # Parse the timestamp string if needed
+            if isinstance(interaction_time, str):
+                try:
+                    # Try to parse string timestamp and remove timezone
+                    timestamp = interaction_time.split("T")[0]  # Take just the date part
+                    interaction_time = datetime.strptime(timestamp, "%Y-%m-%d").date()
+                except Exception as e:
+                    # If parsing fails, use current date
+                    interaction_time = current_date
+            # If it's already a datetime, convert to date
+            elif hasattr(interaction_time, 'date'):
+                try:
+                    interaction_time = interaction_time.replace(tzinfo=None).date()
+                except:
+                    interaction_time = current_date
+            else:
+                # Fallback to current date
+                interaction_time = current_date
+
+            # Calculate days between dates
+            days_ago = max(0, (current_date - interaction_time).days)
+            decay = math.exp(-days_ago / 30)  # Exponential decay over 30 days
+            return weight * decay
+
+        # Track recommended places with scores
+        place_scores = {}
+
+        # Get existing interactions for user
+        user_interactions = {}
+        for i in interactions_collection.find({"user_id": user_id}):
+            if "place_id" in i and "interaction_type" in i:
+                user_interactions[i["place_id"]] = i["interaction_type"]
+
+        # Process interactions from similar users
+        for similar_user in similar_users:
+            interactions = list(interactions_collection.find({"user_id": similar_user["_id"]}))
+
+            for interaction in interactions:
+                # Skip if place_id or interaction_type is missing
+                if "place_id" not in interaction or "interaction_type" not in interaction:
+                    continue
+
+                place_id = interaction["place_id"]
+                action = interaction["interaction_type"]
+
+                # Get timestamp with fallback to current date
+                timestamp = interaction.get("timestamp", current_date)
+
+                # Skip if user already dislikes this place
+                if place_id in user_interactions and user_interactions[place_id] == "dislike":
+                    continue
+
+                weight = action_weights.get(action, 1)  # Default weight of 1 for unknown actions
+                weighted_score = apply_time_decay(weight, timestamp)
+
+                # Only add positively scored places
+                if weighted_score > 0:
+                    if place_id not in place_scores:
+                        place_scores[place_id] = 0
+                    place_scores[place_id] += weighted_score
+
+        # Sort places by score
+        sorted_places = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)
+        recommended_place_ids = [place_id for place_id, _ in sorted_places]
+
+        logger.info(f"Found {len(recommended_place_ids)} collaborative recommendations for user {user_id}")
+        return recommended_place_ids
+    except Exception as e:
+        logger.error(f"Error in collaborative filtering: {str(e)}")
+        return []
+
+def get_discovery_places(user_id, limit=10):
+    """Get places outside the user's normal patterns for discovery"""
+    try:
+        user_prefs = get_user_travel_preferences(user_id)
+        if not user_prefs:
+            return []
+
+        preferred_categories = user_prefs.get("preferred_categories", [])
+        preferred_tags = user_prefs.get("preferred_tags", [])
+
+        # Find places in different categories but highly rated
+        discovery_query = {
+            "$and": [
+                {"category": {"$nin": preferred_categories}},
+                {"average_rating": {"$gte": 4.0}}  # Only high-rated places
+            ]
+        }
+
+        # Get discovery places and sort by rating
+        discovery_places = list(places_collection.find(discovery_query).sort("average_rating", -1).limit(limit * 2))
+
+        # If we don't have enough, try a broader search
+        if len(discovery_places) < limit:
+            fallback_places = list(places_collection.find({
+                "category": {"$nin": preferred_categories}
+            }).sort("average_rating", -1).limit(limit * 2))
+
+            # Add any new places not already in discovery_places
+            existing_ids = set(p["_id"] for p in discovery_places)
+            for place in fallback_places:
+                if place["_id"] not in existing_ids:
+                    discovery_places.append(place)
+                    if len(discovery_places) >= limit * 2:
+                        break
+
+        # Randomize the order for more variety in recommendations
+        if discovery_places:
+            random.shuffle(discovery_places)
+
+        logger.info(f"Found {len(discovery_places[:limit])} discovery places for user {user_id}")
+        return discovery_places[:limit]
+    except Exception as e:
+        logger.error(f"Error getting discovery places: {str(e)}")
+        return []
+
+
 def rank_places(candidate_places, user_id):
     """
     Rank places based on user engagement and popularity metrics.
@@ -1059,71 +1216,126 @@ def refresh_shown_places(user_id, shown_place_ids, limit=10):
 
 def generate_final_recommendations(user_id, num_recommendations=10):
     """
-    Generate the final recommendations using cached shown places and generating new ones as needed.
+    Generate final personalized recommendations for a user.
+    Enhanced with collaborative filtering (40% of recommendations).
     
     Args:
         user_id: User ID
-        num_recommendations: Number of recommendations to return
+        num_recommendations: Number of recommendations to generate
         
     Returns:
-        List of recommendation objects
+        List of personalized recommendations
     """
     try:
-        logger.info(f"Generating recommendations for user {user_id}")
+        logger.info(f"Generating final recommendations for user {user_id}")
         
         # Get user preferences
-        user_preferences = get_user_preferences(user_id)
+        user_prefs = get_user_travel_preferences(user_id)
         
-        if not user_preferences:
-            logger.warning(f"No preferences found for user {user_id}, using defaults")
-            user_preferences = {"preferred_categories": [], "preferred_tags": []}
-            
-        # Get previously shown place IDs and last shown place IDs
-        previously_shown_ids = get_previously_shown_places(user_id)
-        last_shown_ids = get_last_shown_places(user_id)
-        
-        logger.info(f"User {user_id} has {len(previously_shown_ids)} previously shown places, {len(last_shown_ids)} from last request")
-        
+        # PART 1: Get refresh requests - places from previous request the user wants to see again
         recommendations = []
+        refresh_requests = refresh_requests_collection.find_one({"user_id": user_id})
         
-        # PART 1: Rerank most recently shown places
-        if last_shown_ids:
-            # Limit to half of requested recommendations to make room for new places
-            refresh_limit = max(3, num_recommendations // 2)
-            refreshed_places = refresh_shown_places(user_id, last_shown_ids, refresh_limit)
-            
-            # Add refreshed places to recommendations
-            for place in refreshed_places:
-                if len(recommendations) < num_recommendations:
+        if refresh_requests and "place_ids" in refresh_requests:
+            refresh_place_ids = refresh_requests.get("place_ids", [])
+            if refresh_place_ids:
+                refresh_places = list(places_collection.find({"_id": {"$in": refresh_place_ids}}))
+                
+                for place in refresh_places:
                     place["source"] = "refreshed"
                     recommendations.append(place)
-            
-            logger.info(f"Added {len(refreshed_places)} refreshed places")
-            
-        # PART 2: Add new recommendations
-        remaining_needed = num_recommendations - len(recommendations)
+                
+                logger.info(f"Added {len(refresh_places)} refreshed places")
+                
+                # Clear refresh requests once processed
+                refresh_requests_collection.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"place_ids": []}}
+                )
         
-        if remaining_needed > 0:
-            # Get candidate places based on user preferences
-            candidate_places = get_candidate_places(user_preferences, user_id, size=30)
+        # PART 2: Calculate how many collaborative recommendations to include (40% of total)
+        collab_count = int(num_recommendations * 0.4)
+        content_count = num_recommendations - len(recommendations) - collab_count
+        
+        # Get collaborative recommendations (40%)
+        if collab_count > 0:
+            collab_places_ids = get_collaborative_recommendations(user_id)
             
-            # Filter out places that have been shown before
-            candidate_places = [p for p in candidate_places if p["_id"] not in previously_shown_ids]
+            # Get previously shown places
+            previously_shown = shown_places_collection.find_one({"user_id": user_id})
+            previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
+            last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
             
-            # Rank remaining places
-            ranked_places = rank_places(candidate_places, user_id)
+            # Filter out previously shown places
+            new_collab_place_ids = [pid for pid in collab_places_ids if pid not in previously_shown_ids]
+            
+            # Get the actual place documents
+            if new_collab_place_ids:
+                collab_places = list(places_collection.find({"_id": {"$in": new_collab_place_ids}}))
+                
+                # Sort collaborative recommendations by rating for consistency
+                collab_places.sort(key=lambda x: x.get("average_rating", 0), reverse=True)
+                
+                # Add collaborative places
+                for place in collab_places[:collab_count]:
+                    place["source"] = "collaborative"
+                    recommendations.append(place)
+                
+                logger.info(f"Added {min(collab_count, len(collab_places))} collaborative filtering recommendations")
+            else:
+                # If no new collaborative recommendations, get trending places instead
+                trending_places = get_trending_places(collab_count)
+                filtered_trending = [p for p in trending_places if p["_id"] not in previously_shown_ids]
+                
+                for place in filtered_trending[:collab_count]:
+                    place["source"] = "trending"
+                    recommendations.append(place)
+                
+                logger.info(f"No new collaborative recommendations, added {len(filtered_trending[:collab_count])} trending places instead")
+        
+        # PART 3: Get content-based recommendations for the remaining slots
+        remaining_content_count = num_recommendations - len(recommendations)
+        
+        if remaining_content_count > 0:
+            # Get candidate places
+            candidate_places = get_candidate_places(user_prefs, user_id, size=remaining_content_count * 3)
+            
+            # Get previously shown places
+            previously_shown = shown_places_collection.find_one({"user_id": user_id})
+            previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
+            last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
+            
+            # Apply personalization factors
+            ranked_places = []
+            
+            for place in candidate_places:
+                # Skip if already in recommendations
+                if place["_id"] in [r["_id"] for r in recommendations]:
+                    continue
+                
+                # Skip if shown in previous requests
+                if place["_id"] in previously_shown_ids:
+                    continue
+                
+                # Calculate personalization score
+                score = calculate_personalization_score(place, user_id, user_prefs)
+                ranked_places.append((place, score))
+            
+            # Sort places by personalization score
+            ranked_places.sort(key=lambda x: x[1], reverse=True)
+            ranked_places = [place for place, _ in ranked_places]
             
             # Add ranked places up to the limit
             for place in ranked_places:
                 if len(recommendations) < num_recommendations:
-                    place["source"] = "new"
+                    place["source"] = "content_based"
                     recommendations.append(place)
                 else:
                     break
-                    
-            logger.info(f"Added {min(remaining_needed, len(ranked_places))} new places")
             
-        # PART 3: If we still need more recommendations (e.g., if user has seen all places)
+            logger.info(f"Added {min(remaining_content_count, len(ranked_places))} content-based places")
+        
+        # PART 4: If we still need more recommendations (e.g., if user has seen all places)
         if len(recommendations) < num_recommendations:
             remaining_needed = num_recommendations - len(recommendations)
             logger.info(f"Still need {remaining_needed} more recommendations, considering already shown places")
@@ -1140,10 +1352,24 @@ def generate_final_recommendations(user_id, num_recommendations=10):
                 for place in reused_places:
                     place["source"] = "reused"
                     recommendations.append(place)
-                    
-                logger.info(f"Added {len(reused_places)} reused places")
                 
-        # PART 4: Last resort - if still not enough, add any places at all
+                logger.info(f"Added {len(reused_places)} reused places")
+        
+        # PART 5: Last resort - if still not enough, add discovery places
+        if len(recommendations) < num_recommendations:
+            remaining_needed = num_recommendations - len(recommendations)
+            logger.info(f"Still need {remaining_needed} more recommendations, adding discovery places")
+            
+            discovery_places = get_discovery_places(user_id, limit=remaining_needed)
+            filtered_discoveries = [p for p in discovery_places if p["_id"] not in [r["_id"] for r in recommendations]]
+            
+            for place in filtered_discoveries:
+                place["source"] = "discovery"
+                recommendations.append(place)
+            
+            logger.info(f"Added {len(filtered_discoveries)} discovery places")
+        
+        # PART 6: Absolute last resort - add any places at all
         if len(recommendations) < num_recommendations:
             remaining_needed = num_recommendations - len(recommendations)
             logger.info(f"Still need {remaining_needed} more recommendations, adding any available places")
@@ -1154,16 +1380,16 @@ def generate_final_recommendations(user_id, num_recommendations=10):
                 if place["_id"] not in [r["_id"] for r in recommendations]:
                     place["source"] = "fallback"
                     recommendations.append(place)
-                    
-            logger.info(f"Added {len(last_resort_places)} fallback places")
             
+            logger.info(f"Added {len(last_resort_places)} fallback places")
+        
         # Track the shown places
         new_place_ids = [place["_id"] for place in recommendations if place["source"] != "refreshed"]
         update_shown_places(user_id, new_place_ids, max_places=100)
         
         logger.info(f"Generated {len(recommendations)} total recommendations for user {user_id}")
         return recommendations
-        
+    
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")
         # Return some fallback recommendations in case of error
@@ -1171,7 +1397,6 @@ def generate_final_recommendations(user_id, num_recommendations=10):
         for place in fallback_places:
             place["source"] = "error_fallback"
         return fallback_places
-
 def get_recommendations_with_caching(user_id, force_refresh=False, num_recommendations=10):
     """
     Get recommendations for a user with caching.

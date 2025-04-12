@@ -1317,81 +1317,97 @@ def generate_hybrid_roadmap(user_id):
     group_type = travel_prefs.get("group_type", "")
     travel_dates = travel_prefs.get("travel_dates", "")
     
-    # Get month from travel dates
+    # Get preferred destinations (if any)
+    destinations = travel_prefs.get("destinations", [])
+    
+    # Extract month from travel dates
     travel_month = parse_travel_dates(travel_dates)
-    seasonal_weights = get_seasonal_activities(travel_month)
     
     logger.info(f"User {user_id} preferences: Budget={budget}, Group={group_type}, Month={travel_month}")
+    logger.info(f"Accessibility needs: {accessibility_needs}, Destinations: {destinations}")
     
     # Get all possible places
     all_places = list(places_collection.find())
     
-    # --- STAGE 1: Apply critical filters ---
-    # Filter places that don't meet accessibility requirements
-    critical_filtered_places = [
-        place for place in all_places
-        if check_accessibility_compatibility(place, accessibility_needs)
-    ]
+    # --- CRITICAL FILTERS PIPELINE ---
     
-    logger.info(f"Stage 1: {len(critical_filtered_places)}/{len(all_places)} places passed critical filters")
+    # STAGE 1: Accessibility Filter
+    if accessibility_needs:
+        filtered_places = [
+            place for place in all_places
+            if check_accessibility_compatibility(place, accessibility_needs)
+        ]
+        
+        # FALLBACK 1: If no places match accessibility, use all places
+        if len(filtered_places) == 0:
+            logger.warning(f"⚠️ No places match accessibility needs {accessibility_needs}, using all places")
+            filtered_places = all_places
+    else:
+        filtered_places = all_places
     
-    # --- STAGE 2: Score places based on soft constraints with weights ---
+    logger.info(f"After accessibility filter: {len(filtered_places)}/{len(all_places)} places remaining")
     
-    # Define weights for soft constraints:
-    # Budget (30%), Accessibility (20%), Group Type (30%), Seasonal (20%)
-    constraint_weights = {
-        "budget": 0.3,
-        "accessibility": 0.2,
-        "group_type": 0.3,
-        "seasonal": 0.2
-    }
+    # STAGE 2: Destination Filter (CRITICAL - no fallback)
+    if destinations and len(destinations) > 0:
+        destination_places = []
+        for place in filtered_places:
+            location = place.get("location", {})
+            city = location.get("city", "")
+            country = location.get("country", "")
+            
+            # Check if place matches any preferred destination
+            for destination in destinations:
+                if (destination.lower() in city.lower() or 
+                    destination.lower() in country.lower() or
+                    city.lower() in destination.lower() or
+                    country.lower() in destination.lower()):
+                    destination_places.append(place)
+                    break
+        
+        # No fallback here - destinations are critical
+        filtered_places = destination_places
+        logger.info(f"After destination filter: {len(filtered_places)} places in requested destinations")
     
+    # --- SCORING PHASE: Score remaining places ---
     scored_places = []
     
-    for place in critical_filtered_places:
-        # Initialize total score
-        total_score = 0
-        
-        # 1. Budget compatibility (30%)
-        place_budget = place.get("budget_level", "medium")
+    for place in filtered_places:
+        # 1. Budget score (30%)
+        place_budget = place.get("budget", "medium")
         place_budget_level = map_budget_level(place_budget)
         budget_score = calculate_budget_compatibility(place_budget_level, budget_level)
         
-        # 2. Accessibility bonus (20%)
-        # Give bonus score for places with more accessibility features than required
-        place_features = place.get("accessibility_features", [])
-        accessibility_score = len(place_features) / 10  # Normalize assuming max 10 features
+        # 2. Accessibility score (20%)
+        place_accessibility = place.get("accessibility", [])
+        if not isinstance(place_accessibility, list):
+            place_accessibility = [place_accessibility] if place_accessibility else []
         
-        # 3. Group type compatibility (30%)
+        accessibility_score = len(place_accessibility) / 10  # Normalize assuming max 10 features
+        
+        # 3. Group type score (30%)
         group_score = 0.5  # Default score
-        place_group_types = place.get("suitable_for", [])
+        place_group_type = place.get("group_type", "")
         
-        if group_type and place_group_types:
-            # Check if user's group type matches place's suitable_for
-            if isinstance(place_group_types, list) and group_type in place_group_types:
-                group_score = 1.0
-            elif isinstance(place_group_types, str) and group_type == place_group_types:
-                group_score = 1.0
+        if group_type and place_group_type:
+            if group_type.lower() == place_group_type.lower():
+                group_score = 1.0  # Exact match
+            elif group_type.lower() in place_group_type.lower() or place_group_type.lower() in group_type.lower():
+                group_score = 0.8  # Partial match
         
-        # 4. Seasonal compatibility (20%)
+        # 4. Seasonal score (20%)
         seasonal_score = 0.5  # Default score
-        place_seasons = place.get("best_seasons", [])
+        appropriate_time = place.get("appropriate_time", [])
         
-        if place_seasons:
-            # Calculate weighted score based on current season
-            season_score = 0
-            for season, weight in seasonal_weights.items():
-                if season in place_seasons:
-                    season_score += weight
-            
-            seasonal_score = min(1.0, season_score)  # Cap at 1.0
+        if travel_month and appropriate_time and isinstance(appropriate_time, list):
+            if travel_month in appropriate_time:
+                seasonal_score = 1.0  # Direct month match
         
-        # Calculate weighted total score
+        # Calculate total weighted score
         total_score = (
-            budget_score * constraint_weights["budget"] +
-            accessibility_score * constraint_weights["accessibility"] +
-            group_score * constraint_weights["group_type"] +
-            seasonal_score * constraint_weights["seasonal"]
+            budget_score * 0.3 +
+            accessibility_score * 0.2 +
+            group_score * 0.3 +
+            seasonal_score * 0.2
         )
         
         # Add to scored places
@@ -1415,14 +1431,14 @@ def generate_hybrid_roadmap(user_id):
         "places": [],
         "routes": [],
         "accessibility_needs": accessibility_needs,
-        "seasonal_weights": seasonal_weights
+        "seasonal_weights": {travel_month: 1.0} if travel_month else {}
     }
     
-    # Add top scoring places to roadmap
-    for item in scored_places[:10]:  # Top 10 places
+    # Add top scoring places to roadmap (up to 10)
+    for item in scored_places[:10]:
         place = item["place"]
         
-        # Add score details for debugging/explanation
+        # Add score details for explanation
         place["match_scores"] = {
             "total": item["score"],
             "budget": item["budget_score"],
@@ -1433,13 +1449,28 @@ def generate_hybrid_roadmap(user_id):
         
         roadmap["places"].append(place)
     
-    # Add simple routes between places in order of scoring
+    # FALLBACK 2: If no places after all filtering and scoring, add top rated places
+    if len(roadmap["places"]) == 0:
+        logger.warning(f"⚠️ No places in final roadmap for user {user_id}, using top rated places")
+        top_places = list(places_collection.find().sort("average_rating", -1).limit(10))
+        
+        for place in top_places:
+            # Add default scores
+            place["match_scores"] = {
+                "total": 0.5,
+                "budget": 0.5,
+                "accessibility": 0.5,
+                "group": 0.5,
+                "seasonal": 0.5
+            }
+            roadmap["places"].append(place)
+    
+    # Add routes between places
     if len(roadmap["places"]) >= 2:
         for i in range(len(roadmap["places"]) - 1):
             place1 = roadmap["places"][i]
             place2 = roadmap["places"][i + 1]
             
-            # Calculate simple route (direct line)
             roadmap["routes"].append({
                 "from": place1["_id"],
                 "to": place2["_id"],

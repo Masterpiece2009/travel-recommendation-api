@@ -1373,50 +1373,55 @@ def reset_user_shown_places(user_id):
         logger.error(f"Error resetting shown places: {e}")
         return False
 
-def update_shown_places(user_id, new_place_ids, max_places=None):
+def update_shown_places(user_id, new_place_ids, max_places=100):
     """
     Update the list of shown places for a user.
-    If max_places is provided, limit the list to that many places.
-    Also updates last_shown_places for tracking only the most recent request.
-    Includes timestamp for TTL (6-hour expiration).
+    Keeps track of places in chronological order, with most recent at the END of the list.
     
     Args:
         user_id: User ID
-        new_place_ids: List of place IDs shown in current request
-        max_places: Maximum number of places to track (if None, tracks all)
-        
-    Returns:
-        List of all place IDs shown to this user
+        new_place_ids: List of new place IDs to add to shown list
+        max_places: Maximum number of places to keep in history
     """
     try:
-        if not new_place_ids:  # Skip update if no new places
-            return get_previously_shown_places(user_id)
-
-        existing_places = get_previously_shown_places(user_id)
-
-        # Add new places that aren't already in the list
-        all_place_ids = existing_places + [pid for pid in new_place_ids if pid not in existing_places]
-
-        # If max_places is set, limit the list to the most recent places
-        if max_places and len(all_place_ids) > max_places:
-            all_place_ids = all_place_ids[-max_places:]
-
-        # Update the database with all shown places and timestamp for TTL
-        shown_places_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "place_ids": all_place_ids,
-                "last_shown_place_ids": new_place_ids,  # Track only this request's places
-                "timestamp": datetime.now()  # Add timestamp for TTL expiration
-            }},
-            upsert=True
-        )
-
-        return all_place_ids
+        # Get current shown places
+        shown_doc = shown_places_collection.find_one({"user_id": user_id})
+        
+        if shown_doc:
+            # Get existing place IDs
+            existing_ids = shown_doc.get("place_ids", [])
+            
+            # Remove new IDs if they already exist (to avoid duplicates)
+            existing_ids = [pid for pid in existing_ids if pid not in new_place_ids]
+            
+            # Add new IDs at the END of the list (most recent)
+            updated_ids = existing_ids + new_place_ids
+            
+            # Keep only the most recent max_places
+            if len(updated_ids) > max_places:
+                updated_ids = updated_ids[-max_places:]
+            
+            # Update document with new list and last shown
+            shown_places_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "place_ids": updated_ids, 
+                    "last_shown_place_ids": new_place_ids,
+                    "last_updated": datetime.now()
+                }}
+            )
+        else:
+            # Create new document
+            shown_places_collection.insert_one({
+                "user_id": user_id,
+                "place_ids": new_place_ids,
+                "last_shown_place_ids": new_place_ids,
+                "last_updated": datetime.now()
+            })
+            
+        logger.info(f"Updated shown places for user {user_id}, added {len(new_place_ids)} places")
     except Exception as e:
-        logger.error(f"Error updating shown places: {e}")
-        return []
-
+        logger.error(f"Error updating shown places: {str(e)}")
 def get_unshown_places(user_id, limit=10):
     """
     Get places that haven't been shown to the user yet.

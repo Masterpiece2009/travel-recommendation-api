@@ -510,7 +510,6 @@ def store_cache_entry(user_id, recommendations, sequence):
 # --- PART 3: RECOMMENDATION ALGORITHM FUNCTIONS ---
 
 # --- Recommendation System: Core Functions ---
-
 def get_candidate_places(user_preferences, user_id, size=30):
     """
     Get candidate places for recommendations based on user preferences.
@@ -857,6 +856,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
     
     logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
     return candidate_places
+
 
 
 

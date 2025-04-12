@@ -1,25 +1,225 @@
-# Part 1: Imports, Setup, and DummyNLP class
+# --- PART 1: IMPORTS AND CONFIGURATION ---
 
-from fastapi import FastAPI, Query, BackgroundTasks, Request
+import os
+import json
+import logging
+import pymongo
+import urllib.parse
+import spacy
+import math
+import random
+import asyncio
+import sys
+import time
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, Request, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sklearn.preprocessing import MinMaxScaler
-import logging
-import os
-import json
-import random
-import asyncio
-from datetime import datetime, timedelta
-import math
-import spacy
-import numpy as np
-from typing import List, Dict, Any, Optional
+from geopy.distance import geodesic
 
-# Setup FastAPI app
-app = FastAPI(title="Travel API", version="2.0.0")
+# Configure logging with more detailed format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Add CORS middleware
+# ✅ Securely Connect to MongoDB
+password = os.environ.get("MONGO_PASSWORD", "master2002_B*")  # Fallback for development
+encoded_password = urllib.parse.quote_plus(password)
+
+MONGO_URI = f"mongodb+srv://abdelrahman:{encoded_password}@cluster0.goxvb.mongodb.net/travel_app?retryWrites=true&w=majority&appName=Cluster0"
+
+def connect_mongo(uri, retries=3, retry_delay=2):
+    """Attempts to connect to MongoDB with improved retry logic."""
+    for attempt in range(retries):
+        try:
+            client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
+            client.server_info()  # Force connection check
+            logger.info("✅ MongoDB connection established!")
+            return client
+        except Exception as e:
+            if attempt < retries - 1:
+                logger.warning(f"❌ MongoDB connection failed (Attempt {attempt + 1}/{retries}): {e}")
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"❌ MongoDB connection failed after {retries} attempts: {e}")
+                raise Exception(f"❌ MongoDB connection failed after {retries} attempts: {e}")
+
+client = connect_mongo(MONGO_URI)
+db = client["travel_app"]
+
+# Define Collections
+users_collection = db["users"]
+places_collection = db["places"]
+interactions_collection = db["interactions"]
+search_queries_collection = db["search_queries"]
+travel_preferences_collection = db["user_travel_preferences"]
+recommendations_cache_collection = db["recommendations_cache"]
+shown_places_collection = db["shown_places"]
+roadmaps_collection = db["roadmaps"]  # For roadmaps
+cache_locks_collection = db["cache_locks"]  # New collection for tracking locks
+
+# --- CREATE TTL INDEXES ---
+# These indexes automatically remove documents after a specified time period
+
+# TTL index for roadmaps (expires after 24 hours)
+try:
+    roadmaps_collection.create_index(
+        [("created_at", pymongo.ASCENDING)],
+        expireAfterSeconds=86400  # 24 hours
+    )
+    logger.info("✅ Created TTL index on roadmaps collection")
+except Exception as e:
+    logger.error(f"❌ Error creating TTL index on roadmaps collection: {e}")
+
+# TTL index for recommendations cache (expires after 6 hours)
+try:
+    recommendations_cache_collection.create_index(
+        [("timestamp", pymongo.ASCENDING)],
+        expireAfterSeconds=21600  # 6 hours
+    )
+    logger.info("✅ Created TTL index on recommendations_cache collection")
+except Exception as e:
+    logger.error(f"❌ Error creating TTL index on recommendations_cache collection: {e}")
+
+# TTL index for shown places (expires after 6 hours)
+try:
+    shown_places_collection.create_index(
+        [("timestamp", pymongo.ASCENDING)],
+        expireAfterSeconds=21600  # 6 hours
+    )
+    logger.info("✅ Created TTL index on shown_places collection")
+except Exception as e:
+    logger.error(f"❌ Error creating TTL index on shown_places collection: {e}")
+
+# TTL index for cache locks (expires after 10 minutes)
+try:
+    cache_locks_collection.create_index(
+        [("timestamp", pymongo.ASCENDING)],
+        expireAfterSeconds=600  # 10 minutes (safety cleanup for stale locks)
+    )
+    logger.info("✅ Created TTL index on cache_locks collection")
+except Exception as e:
+    logger.error(f"❌ Error creating TTL index on cache_locks collection: {e}")
+
+# Create index on user_id field for better query performance
+for collection_name in ["recommendations_cache", "shown_places", "roadmaps", "cache_locks"]:
+    try:
+        db[collection_name].create_index([("user_id", pymongo.ASCENDING)])
+        logger.info(f"✅ Created user_id index on {collection_name} collection")
+    except Exception as e:
+        logger.error(f"❌ Error creating index on {collection_name}: {e}")
+
+# --- Initialize spaCy model ---
+def load_spacy_model(model="en_core_web_md", retries=2):  # Use medium model by default
+    """Attempts to load the spaCy model with better vector checking."""
+    logger.info(f"🔄 Attempting to load spaCy model: {model}")
+    
+    for attempt in range(retries):
+        try:
+            nlp = spacy.load(model)
+            
+            # Verify that the model has word vectors
+            test_doc = nlp("travel")
+            has_vectors = nlp.vocab.vectors.n_keys > 0 and test_doc.vector_norm > 0
+            
+            if has_vectors:
+                logger.info(f"✅ Successfully loaded spaCy model: {model} WITH WORD VECTORS")
+                return nlp
+            else:
+                logger.warning(f"⚠️ Model {model} loaded but NO WORD VECTORS found!")
+                
+                # If this is the 'md' model and it doesn't have vectors, try 'sm' model
+                if model == "en_core_web_md" and attempt == 0:
+                    logger.info("⚠️ Medium model doesn't have vectors. Attempting to download vectors...")
+                    try:
+                        import subprocess
+                        result = subprocess.run([sys.executable, "-m", "spacy", "download", model], 
+                                              capture_output=True, text=True)
+                        if result.returncode == 0:
+                            logger.info(f"✅ Successfully downloaded model: {model}")
+                            continue  # Try loading again
+                    except Exception as download_err:
+                        logger.error(f"❌ Failed to download model: {download_err}")
+                
+                # If we can't fix the current model, fall back to the small model
+                if model != "en_core_web_sm":
+                    logger.info("🔄 Falling back to small model...")
+                    return load_spacy_model("en_core_web_sm", 1)
+        except Exception as e:
+            logger.error(f"❌ Error loading NLP model (Attempt {attempt + 1}/{retries}): {e}")
+            try:
+                logger.info(f"📥 Downloading spaCy model: {model}")
+                import subprocess
+                result = subprocess.run([sys.executable, "-m", "spacy", "download", model], 
+                                       capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info(f"✅ Successfully downloaded model: {model}")
+                else:
+                    logger.error(f"❌ Failed to download model: {result.stderr}")
+            except Exception as download_err:
+                logger.error(f"❌ Failed to download model: {download_err}")
+
+    # Return dummy NLP object as fallback with clear logging
+    class DummyNLP:
+        def __init__(self):
+            self.name = "DummyNLP-Fallback"
+            self.vocab = type('obj', (object,), {
+                'vectors': type('obj', (object,), {'n_keys': 0})
+            })
+            logger.critical("⛔ CRITICAL: Using dummy NLP model! Semantic search will NOT work properly.")
+            
+        def __call__(self, text):
+            class DummyDoc:
+                def __init__(self, text):
+                    self.text = text
+                    self.vector = [0] * 300  # Empty vector
+                    self.vector_norm = 0
+                    
+                def similarity(self, other):
+                    # Fallback similarity using Jaccard index on word overlap
+                    words1 = set(self.text.lower().split())
+                    words2 = set(other.text.lower().split())
+                    
+                    if not words1 or not words2:
+                        return 0
+                        
+                    intersection = words1.intersection(words2)
+                    union = words1.union(words2)
+                    
+                    return len(intersection) / len(union)
+            
+            return DummyDoc(text)
+    
+    logger.warning("⚠️ CRITICAL: Using dummy NLP model as fallback! Semantic search will use word overlap instead.")
+    return DummyNLP()
+
+# Try to load the model with word vectors
+nlp = load_spacy_model()
+
+# Check if model has word vectors and log clearly
+test_text = "travel"
+test_doc = nlp(test_text)
+has_vectors = hasattr(test_doc, 'vector_norm') and test_doc.vector_norm > 0
+
+if has_vectors:
+    logger.info("✅ SUCCESS: NLP Model loaded with WORD VECTORS - semantic search will work properly")
+else:
+    logger.warning("⚠️ WARNING: NLP Model doesn't have word vectors - semantic search will use fallback algorithm")
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Travel API",
+    description="API for travel recommendations and roadmaps",
+    version="2.0.0"  # Updated version
+)
+
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,515 +227,591 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# --- PART 2: MODELS AND SHARED UTILITY FUNCTIONS ---
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("travel-api")
-
-# Global DummyNLP class definition - FIX #1
-class DummyNLP:
-    """Fallback NLP class when spaCy is unavailable or vectors aren't loaded."""
-    
-    def __init__(self):
-        self.name = "dummy_nlp"
-        self.vocab = type('obj', (object,), {
-            'vectors': type('obj', (object,), {'n_keys': 0})
-        })
-    
-    def __call__(self, text):
-        """Return a dummy document without vector capabilities."""
-        return type('obj', (object,), {
-            'vector_norm': 0,
-            'vector': np.zeros(1),
-            'similarity': lambda x: 0.0,
-            'text': text
-        })
-
-# MongoDB connection setup
-import pymongo
-from pymongo import MongoClient
-
-# MongoDB connection
-mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/travel")
-client = MongoClient(mongo_uri)
-db = client.get_database()
-
-# Collection references
-users_collection = db["users"]
-places_collection = db["places"]
-interactions_collection = db["interactions"]
-search_queries_collection = db["search_queries"]
-user_travel_preferences = db["user_travel_preferences"]
-recommendations_cache_collection = db["recommendations_cache"]
-shown_places_collection = db["shown_places"]
-roadmaps_collection = db["roadmaps"]
-cache_locks_collection = db["cache_locks"]
-
-# Load spaCy model
-def load_spacy_model():
-    """Load the spaCy model with word vectors for semantic search"""
-    try:
-        # Try to load medium English model with word vectors
-        nlp = spacy.load("en_core_web_md")
-        logger.info("Loaded spaCy model: en_core_web_md")
-        
-        # Verify vectors are available
-        test_doc = nlp("test")
-        has_vectors = hasattr(test_doc, 'vector_norm') and test_doc.vector_norm > 0
-        
-        if not has_vectors:
-            logger.warning("⚠️ Loaded spaCy model doesn't have word vectors")
-            return DummyNLP()
-            
-        return nlp
-    except Exception as e:
-        logger.error(f"Failed to load spaCy model: {str(e)}")
-        logger.warning("⚠️ Using fallback text matching without vectors")
-        return DummyNLP()
-
-# Load NLP model
-nlp = load_spacy_model()
-
-# Request models
+# --- Pydantic Models ---
 class RecommendationRequest(BaseModel):
     user_id: str
-    num_recommendations: int = 10
+    num_recommendations: Optional[int] = 10
 
 class RoadmapRequest(BaseModel):
     user_id: str
 
-# Part 2: User Preferences and Helper Functions
+class SearchRequest(BaseModel):
+    user_id: str
+    query: str
+    limit: Optional[int] = 10
+
+# --- Shared Utility Functions ---
+
+def get_user_data(user_id):
+    """Get complete user data including preferences"""
+    user = users_collection.find_one({"_id": user_id})
+    
+    if not user:
+        logger.warning(f"User {user_id} not found")
+        return None
+        
+    return user
 
 def get_user_preferences(user_id):
-    """
-    Get general user preferences
+    """Get user general preferences (categories & tags only)"""
+    user = get_user_data(user_id)
     
-    Args:
-        user_id: User ID
+    if not user:
+        return None
         
-    Returns:
-        User preferences dict or None if not found
-    """
-    try:
-        user = users_collection.find_one({"_id": user_id})
-        if user:
-            return user.get("preferences", {})
-        return None
-    except Exception as e:
-        logger.error(f"Error getting user preferences: {str(e)}")
-        return None
+    # Handle the nested preferences structure
+    preferences = user.get("preferences", {})
+    
+    return {
+        "preferred_categories": preferences.get("categories", []),
+        "preferred_tags": preferences.get("tags", []),
+    }
 
 def get_user_travel_preferences(user_id):
-    """
-    Get travel-specific user preferences
+    """Get user travel-specific preferences, including budget"""
+    travel_prefs = travel_preferences_collection.find_one(
+        {"user_id": user_id}
+    )
     
-    Args:
-        user_id: User ID
+    if not travel_prefs:
+        logger.warning(f"No travel preferences found for user {user_id}")
+        return None
         
-    Returns:
-        Travel preferences dict or None if not found
-    """
-    try:
-        prefs = user_travel_preferences.find_one({"user_id": user_id})
-        if prefs:
-            return prefs
-        return None
-    except Exception as e:
-        logger.error(f"Error getting travel preferences: {str(e)}")
-        return None
+    return {
+        "destinations": travel_prefs.get("destinations", []),
+        "travel_dates": travel_prefs.get("travel_dates", ""),
+        "accessibility_needs": travel_prefs.get("accessibility_needs", []),
+        "budget": travel_prefs.get("budget", "medium"),  # Default to 'medium' if missing
+        "group_type": travel_prefs.get("group_type", "")  # Added group_type
+    }
 
-def parse_travel_dates(date_string):
+def compute_text_similarity(text1, text2):
     """
-    Parse travel dates string to extract month
+    Compute similarity between two text strings.
+    Uses spaCy word vectors if available, falls back to word overlap otherwise.
     
     Args:
-        date_string: String representing travel dates
+        text1: First text string
+        text2: Second text string
         
     Returns:
-        Month name or None if can't be determined
+        Similarity score between 0 and 1
     """
-    if not date_string:
+    if not text1 or not text2:
+        return 0
+        
+    try:
+        # Try using spaCy word vectors
+        doc1 = nlp(text1.lower())
+        doc2 = nlp(text2.lower())
+        
+        # Check if vectors are available (not all models have vectors)
+        if hasattr(doc1, 'vector_norm') and doc1.vector_norm > 0 and hasattr(doc2, 'vector_norm') and doc2.vector_norm > 0:
+            similarity = doc1.similarity(doc2)
+            logger.debug(f"Vector similarity between '{text1}' and '{text2}': {similarity:.2f}")
+            return similarity
+        
+        # Fall back to basic word overlap if vectors aren't available
+        words1 = set(word.lower() for word in text1.split())
+        words2 = set(word.lower() for word in text2.split())
+        
+        if not words1 or not words2:
+            return 0
+            
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        jaccard_similarity = len(intersection) / len(union) if union else 0
+        logger.debug(f"Jaccard similarity between '{text1}' and '{text2}': {jaccard_similarity:.2f}")
+        return jaccard_similarity
+        
+    except Exception as e:
+        logger.error(f"Error computing text similarity: {str(e)}")
+        
+        # Emergency fallback
+        return 0
+
+def parse_travel_dates(travel_dates_str):
+    """
+    Parse the travel_dates string to extract month information.
+    
+    Args:
+        travel_dates_str: String containing travel dates (e.g. "March 2025", "now", "August 2025")
+        
+    Returns:
+        String containing the month name or None if not parseable
+    """
+    if not travel_dates_str:
         return None
         
-    months = [
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    ]
-    
+    # If user selected "now", return current month
+    if travel_dates_str.lower() == "now":
+        return datetime.now().strftime("%B")  # Returns month name like "March"
+        
+    # Try to parse the string as a date
     try:
-        # Try to extract a date from the string
-        for month in months:
-            if month in date_string:
-                return month
-                
-        # Try parsing as ISO date
-        if '-' in date_string:
-            date_parts = date_string.split('-')
-            if len(date_parts) >= 2:
-                # Try to get month from numeric value
-                month_num = int(date_parts[1])
-                if 1 <= month_num <= 12:
-                    return months[month_num - 1]
-    except Exception:
-        # Fall back to current month if parsing fails
-        return months[datetime.now().month - 1]
-    
-    # Default to current month
-    return months[datetime.now().month - 1]
+        # Assume format is like "March 2025" or similar
+        date_parts = travel_dates_str.split()
+        if len(date_parts) >= 1:
+            # First part should be the month name
+            month_name = date_parts[0].capitalize()
+            # Check if it's a valid month name
+            valid_months = [
+                "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            ]
+            if month_name in valid_months:
+                return month_name
+    except Exception as e:
+        logger.error(f"Error parsing travel dates: {e}")
+        
+    # Return current month as fallback
+    logger.warning(f"Could not parse travel dates '{travel_dates_str}', using current month")
+    return datetime.now().strftime("%B")
 
-def extract_keywords_from_query(query_text):
+def apply_time_decay(weight, interaction_time):
     """
-    Extract meaningful keywords from a search query using NLP
+    Apply time-based decay to an interaction weight.
     
     Args:
-        query_text: Search query text
+        weight: Base weight for the interaction
+        interaction_time: Timestamp of the interaction
         
     Returns:
-        List of keywords
+        Adjusted weight after time decay
     """
-    keywords = []
+    # Get current time consistently as timezone-naive
+    current_date = datetime.now().replace(tzinfo=None).date()
     
-    try:
-        # Check if NLP is available
-        if nlp and not isinstance(nlp, DummyNLP):
-            # Process the query with spaCy
-            doc = nlp(query_text.lower())
-            
-            # Extract nouns, proper nouns and adjectives
-            for token in doc:
-                if token.pos_ in ["NOUN", "PROPN", "ADJ"] and len(token.text) > 2:
-                    keywords.append(token.text)
-            
-            # Add any entities as well
-            for ent in doc.ents:
-                if ent.text.lower() not in [k.lower() for k in keywords]:
-                    keywords.append(ent.text)
+    # Handle string timestamps
+    if isinstance(interaction_time, str):
+        try:
+            # Try to parse string timestamp and remove timezone
+            timestamp = interaction_time.split("T")[0]  # Take just the date part
+            interaction_date = datetime.strptime(timestamp, "%Y-%m-%d").date()
+        except Exception as e:
+            logger.error(f"Error parsing interaction timestamp: {e}")
+            return weight  # Return original weight on error
+    # Handle datetime objects
+    elif hasattr(interaction_time, 'date'):
+        try:
+            interaction_date = interaction_time.replace(tzinfo=None).date()
+        except Exception as e:
+            logger.error(f"Error converting interaction time to date: {e}")
+            return weight  # Return original weight on error
+    else:
+        # Fallback to current date
+        logger.warning(f"Invalid interaction_time format: {type(interaction_time)}")
+        return weight
         
-        # Fallback to simple word splitting if no keywords found
-        if not keywords:
-            # Split by spaces and remove short words
-            words = [w.strip() for w in query_text.lower().split() if len(w.strip()) > 2]
-            keywords = words
+    # Calculate days between dates
+    days_ago = max(0, (current_date - interaction_date).days)
+    decay = math.exp(-days_ago / 30)  # Exponential decay over 30 days
+    
+    return weight * decay
+
+def get_numeric_value(obj, key, default=0):
+    """
+    Safely extract numeric values from MongoDB documents.
+    
+    Args:
+        obj: MongoDB document or dictionary
+        key: Key to extract
+        default: Default value if key not found or value not numeric
+        
+    Returns:
+        Numeric value (float or int)
+    """
+    if not obj or not isinstance(obj, dict):
+        return default
+        
+    value = obj.get(key, default)
+    
+    # Handle MongoDB numeric types
+    if isinstance(value, dict):
+        if "$numberDouble" in value:
+            return float(value["$numberDouble"])
+        elif "$numberInt" in value:
+            return int(value["$numberInt"])
+        elif "$numberLong" in value:
+            return int(value["$numberLong"])
             
-        return keywords
-    except Exception as e:
-        logger.error(f"Error extracting keywords: {str(e)}")
-        # Simple fallback
-        words = [w.strip() for w in query_text.lower().split() if len(w.strip()) > 2]
-        return words
+    # Try to convert to float if it's a string
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+            
+    # Return the value directly if it's already a number
+    if isinstance(value, (int, float)):
+        return value
+        
+    return default
 
 def get_user_cached_recommendations(user_id):
     """
-    Get cached recommendations for a user
+    Get all cached recommendation entries for a user, sorted by sequence.
     
     Args:
-        user_id: User ID
+        user_id: User ID to get cache for
         
     Returns:
-        List of cached recommendation entries
+        List of cached recommendation entries sorted by sequence
     """
     try:
-        # Get cached entries, sorted by sequence number
+        # Find all cache entries for this user, sorted by sequence
         return list(recommendations_cache_collection.find(
-            {"user_id": user_id}
+            {"user_id": user_id, "_id": {"$ne": f"cache_lock_{user_id}"}}
         ).sort("sequence", 1))
     except Exception as e:
-        logger.error(f"Error getting cached recommendations: {str(e)}")
+        logger.error(f"Error retrieving cached recommendations: {e}")
         return []
+
+def clear_user_cache(user_id):
+    """
+    Clear all cached recommendations for a user.
+    
+    Args:
+        user_id: User ID to clear cache for
+        
+    Returns:
+        Number of entries deleted
+    """
+    try:
+        result = recommendations_cache_collection.delete_many({"user_id": user_id})
+        return result.deleted_count
+    except Exception as e:
+        logger.error(f"Error clearing user cache: {e}")
+        return 0
 
 def store_cache_entry(user_id, recommendations, sequence):
     """
-    Store a new cache entry
+    Store recommendations in cache with the given sequence number.
     
     Args:
         user_id: User ID
-        recommendations: List of recommendation objects
-        sequence: Sequence number for ordering
-    """
-    try:
-        # Store in cache with expiration (TTL - 24 hours)
-        recommendations_cache_collection.insert_one({
-            "user_id": user_id,
-            "recommendations": recommendations,
-            "sequence": sequence,
-            "timestamp": datetime.now()
-        })
-        
-        logger.info(f"Stored cache entry with sequence {sequence} for user {user_id}")
-    except Exception as e:
-        logger.error(f"Error storing cache entry: {str(e)}")
-
-# Part 3: Candidate Place Generation
-
-def get_candidate_places(user_prefs, user_id, size=20):
-    """
-    Get candidate places based on user preferences and location.
-    
-    Args:
-        user_prefs: User preferences dictionary
-        user_id: User ID
-        size: Number of places to return
+        recommendations: Recommendations data
+        sequence: Sequence number for this cache entry
         
     Returns:
-        List of place documents
+        True if successful, False otherwise
     """
-    logger.info(f"Getting candidate places for user {user_id}")
+    try:
+        recommendations_cache_collection.insert_one({
+            "user_id": user_id,
+            "sequence": sequence,
+            "recommendations": recommendations,
+            "timestamp": datetime.now()
+        })
+        return True
+    except Exception as e:
+        logger.error(f"Error storing cache entry: {e}")
+        return False
+# --- PART 3: RECOMMENDATION ALGORITHM FUNCTIONS ---
+
+# --- Recommendation System: Core Functions ---
+
+def get_candidate_places(user_preferences, user_id, size=30):
+    """
+    Get candidate places for recommendations based on user preferences.
+    Enhanced with improved semantic search for matching places to user preferences.
+    
+    Args:
+        user_preferences: Dictionary containing preferred_categories and preferred_tags
+        user_id: User ID for fetching search history and interactions
+        size: Maximum number of candidate places to return
+        
+    Returns:
+        List of candidate places
+    """
+    logger.info(f"Finding candidate places for user {user_id}")
+    
+    if not user_preferences:
+        logger.warning(f"No user preferences found for user {user_id}, returning popular places")
+        return list(places_collection.find().sort([("average_rating", -1)]).limit(size))
+    
+    # Extract user preferences
+    preferred_categories = user_preferences.get("preferred_categories", [])
+    preferred_tags = user_preferences.get("preferred_tags", [])
+    
+    # --- PART 1: CATEGORY AND TAG MATCHING (60%) ---
+    # Instead of relying solely on MongoDB query, we'll score matches manually
+    all_places = list(places_collection.find())
+    scored_category_tag_places = []
+    
+    for place in all_places:
+        score = 0.0
+        place_category = place.get("category", "")
+        place_tags = place.get("tags", []) if isinstance(place.get("tags"), list) else []
+        
+        # 1. Category matching (70% weight)
+        if place_category and place_category in preferred_categories:
+            score += 0.7
+            logger.debug(f"Category match for place {place.get('name')}: {place_category}")
+        
+        # 2. Tag matching (up to 60% weight)
+        matching_tags = [tag for tag in place_tags if tag in preferred_tags]
+        if matching_tags:
+            # Base score of 0.3 for any tag match, plus up to 0.3 more based on % of tags matched
+            tag_ratio = len(matching_tags) / (len(preferred_tags) or 1)  # Avoid division by zero
+            tag_score = min(0.6, 0.3 + (0.3 * tag_ratio))  # Cap at 0.6
+            score += tag_score
+            logger.debug(f"Tag matches for place {place.get('name')}: {matching_tags}, score: {tag_score:.2f}")
+        
+        # Only consider if there's any match
+        if score > 0:
+            scored_category_tag_places.append((place, score))
+    
+    # Sort by score descending
+    scored_category_tag_places.sort(key=lambda x: x[1], reverse=True)
+    category_tag_places = [place for place, _ in scored_category_tag_places]
+    
+    logger.info(f"Found {len(category_tag_places)} places with direct category/tag matching for user {user_id}")
+    
+    # --- PART 2: SEMANTIC SEARCH BASED ON RECENT QUERIES (40%) ---
+    semantic_places = []
+    
+    # Check if NLP is available with more robust verification
+    nlp_available = False
+    fallback_level = 0
     
     try:
-        # Verify NLP model
-        nlp_valid = nlp and not isinstance(nlp, DummyNLP)
-        fallback_level = 0 if nlp_valid else 1
-        logger.info(f"NLP model: {'valid' if nlp_valid else 'fallback'}, fallback level: {fallback_level}")
+        # Level 1: Check if nlp exists and has vectors
+        if nlp and not isinstance(nlp, DummyNLP):
+            test_doc = nlp("test")
+            if hasattr(test_doc, 'vector_norm') and test_doc.vector_norm > 0:
+                nlp_available = True
+                logger.info("Using full spaCy NLP with word vectors")
+            else:
+                fallback_level = 1
+                logger.warning("spaCy available but word vectors missing, using fallback level 1")
+        else:
+            fallback_level = 2
+            logger.warning("spaCy not available, using fallback level 2")
+    except Exception as e:
+        fallback_level = 3
+        logger.error(f"Error checking NLP availability: {e}, using fallback level 3")
+    
+    try:
+        # Fetch recent search queries for this user
+        search_queries = list(search_queries_collection.find(
+            {"user_id": user_id}
+        ).sort("timestamp", -1).limit(5))
         
-        # Get all places
-        all_places = list(places_collection.find())
+        # Extract keywords from search queries with appropriate fallbacks
+        search_keywords = set()
         
-        if not all_places:
-            logger.warning("No places found in database")
-            return []
-            
-        # --- PART 1: CATEGORY AND TAG MATCHING ---
-        
-        # Extract user preferences
-        preferred_categories = user_prefs.get("preferred_categories", [])
-        preferred_tags = user_prefs.get("preferred_tags", [])
-        
-        # Score places based on category and tag matches
-        scored_places = []
-        
-        for place in all_places:
-            category_score = 0
-            tag_score = 0
-            
-            # Check category matches (70% weight)
-            place_category = place.get("category", "")
-            if place_category and preferred_categories:
-                if place_category in preferred_categories:
-                    category_score = 1.0  # Direct match
-                else:
-                    # Check for substring match
-                    for category in preferred_categories:
-                        if (category.lower() in place_category.lower() or 
-                            place_category.lower() in category.lower()):
-                            category_score = 0.7  # Partial match
-                            break
-            
-            # Check tag matches (60% weight)
-            place_tags = place.get("tags", [])
-            if place_tags and preferred_tags:
-                matching_tags = set(place_tags).intersection(set(preferred_tags))
-                if matching_tags:
-                    # Scale by proportion of matching tags
-                    tag_score = min(1.0, len(matching_tags) / max(3, len(preferred_tags) / 2))
-            
-            # Combine scores: 70% category, 30% tags
-            combined_score = (category_score * 0.7) + (tag_score * 0.3)
-            
-            if combined_score > 0:
-                scored_places.append((place, combined_score))
-        
-        # Sort by score and extract places
-        scored_places.sort(key=lambda x: x[1], reverse=True)
-        category_tag_places = [place for place, _ in scored_places]
-        
-        logger.info(f"Found {len(category_tag_places)} places via category/tag matching")
-        
-        # --- PART 2: SEMANTIC MATCHING ---
-        semantic_places = []
-        
-        try:
-            # Get recent search queries
-            recent_queries = list(search_queries_collection.find(
-                {"user_id": user_id}
-            ).sort("timestamp", -1).limit(5))
-            
-            # Extract search query text
-            search_terms = []
-            for query_doc in recent_queries:
+        for query_doc in search_queries:
+            # Use existing keywords if available
+            if "keywords" in query_doc and query_doc["keywords"]:
+                for keyword in query_doc["keywords"]:
+                    if keyword and len(keyword) > 2:
+                        search_keywords.add(keyword.lower())
+            else:
                 query_text = query_doc.get("query", "")
-                if query_text:
-                    search_terms.append(query_text)
-            
-            # Extract keywords from search queries
-            search_keywords = []
-            for term in search_terms:
-                keywords = extract_keywords_from_query(term)
-                search_keywords.extend(keywords)
-            
-            # Deduplicate keywords
-            search_keywords_list = list(set(search_keywords))
-            logger.info(f"Extracted {len(search_keywords_list)} keywords from {len(search_terms)} search queries")
-            
-            if search_keywords_list:
-                # Calculate semantic similarity scores based on fallback level
-                scored_semantic_places = []
+                if not query_text:
+                    continue
                 
-                # Fallback level determines matching approach
+                # Different keyword extraction based on fallback level
                 if fallback_level == 0:
-                    # Full semantic matching with spaCy word vectors
-                    for place in all_places:
-                        place_id = place["_id"]
-                        
-                        # Skip if place is already highly ranked in category/tag matches
-                        if place in category_tag_places[:int(size * 0.3)]:
-                            continue
-                        
-                        # Initialize scoring components
-                        tag_similarity = 0.0
-                        tag_match_count = 0
-                        description_similarity = 0.0
-                        description_match_count = 0
-                        
-                        # Get place data
-                        tags = place.get("tags", [])
-                        description = place.get("description", "")
-                        
-                        # Process tags with nlp
-                        for keyword in search_keywords_list:
-                            keyword_doc = nlp(keyword.lower())
-                            
-                            # Check each tag for similarity
-                            for tag in tags:
-                                try:
-                                    tag_doc = nlp(tag.lower())
-                                    similarity = keyword_doc.similarity(tag_doc)
-                                    
-                                    # Count significant matches
-                                    if similarity > 0.6:  # Threshold for semantic match
-                                        tag_similarity += similarity
-                                        tag_match_count += 1
-                                except Exception as e:
-                                    continue  # Skip this tag if error
-                            
-                            # Process description with nlp
-                            if description:
-                                try:
-                                    # Process full description
-                                    desc_doc = nlp(description.lower())
-                                    
-                                    # Check semantic similarity
-                                    similarity = keyword_doc.similarity(desc_doc)
-                                    
-                                    # Check exact keyword match in description (bonus)
-                                    if keyword.lower() in description.lower():
-                                        description_similarity += max(similarity, 0.7)  # At least 0.7 for exact match
-                                        description_match_count += 1
-                                    elif similarity > 0.5:  # Lower threshold for description
-                                        description_similarity += similarity
-                                        description_match_count += 1
-                                except Exception as e:
-                                    logger.debug(f"Error comparing description: {str(e)}")
-                        
-                        # Calculate final semantic score
-                        semantic_score = 0.0
-                        
-                        # Tag component (60% weight)
-                        tag_component = 0.0
-                        if tag_match_count > 0:
-                            tag_component = (tag_similarity / tag_match_count) * 0.6
-                        
-                        # Description component (40% weight)
-                        desc_component = 0.0
-                        if description_match_count > 0:
-                            desc_component = (description_similarity / description_match_count) * 0.4
-                        
-                        # Combined score
-                        semantic_score = tag_component + desc_component
-                        
-                        # Only include if score is significant
-                        if semantic_score > 0.3:
-                            scored_semantic_places.append((place, semantic_score))
+                    # Full NLP with POS tagging
+                    doc = nlp(query_text.lower())
+                    for token in doc:
+                        if token.pos_ in ["NOUN", "PROPN", "ADJ"] and not token.is_stop and len(token.text) > 2:
+                            search_keywords.add(token.text)
+                elif fallback_level == 1:
+                    # spaCy available but no vectors - use basic POS if available, otherwise tokenize
+                    try:
+                        doc = nlp(query_text.lower())
+                        for token in doc:
+                            if not token.is_stop and len(token.text) > 2:
+                                search_keywords.add(token.text)
+                    except:
+                        # Tokenize and filter stopwords
+                        stopwords = {'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by'}
+                        for word in query_text.lower().split():
+                            if word not in stopwords and len(word) > 2:
+                                search_keywords.add(word)
                 else:
-                    # Text-based fallback matching (for fallback levels 1-3)
-                    for place in all_places:
-                        # Skip if place is already highly ranked in category/tag matches
-                        if place in category_tag_places[:int(size * 0.3)]:
-                            continue
-                        
-                        match_score = 0.0
-                        tags = place.get("tags", [])
-                        description = place.get("description", "")
-                        
-                        # Tag matching (60% weight)
-                        tag_matches = 0
-                        for keyword in search_keywords_list:
-                            for tag in tags:
-                                # Exact or partial match
-                                if keyword.lower() in tag.lower() or tag.lower() in keyword.lower():
-                                    tag_matches += 1
-                                    break
-                        
-                        if tag_matches > 0:
-                            # Scale by ratio of matched keywords
-                            tag_score = min(1.0, tag_matches / len(search_keywords_list))
-                            match_score += tag_score * 0.6  # 60% weight
-                        
-                        # Description matching (40% weight)
-                        if description:
-                            desc_matches = 0
-                            for keyword in search_keywords_list:
-                                if keyword.lower() in description.lower():
-                                    desc_matches += 1
-                            
-                            if desc_matches > 0:
-                                # Scale by ratio of matched keywords
-                                desc_score = min(1.0, desc_matches / len(search_keywords_list))
-                                match_score += desc_score * 0.4  # 40% weight
-                        
-                        if match_score > 0.2:  # Lower threshold for text matching
-                            scored_semantic_places.append((place, match_score))
-                
-                # Sort by score
-                scored_semantic_places.sort(key=lambda x: x[1], reverse=True)
-                semantic_places = [place for place, _ in scored_semantic_places]
-                logger.info(f"Found {len(semantic_places)} places via search keywords (fallback level: {fallback_level})")
+                    # Basic tokenization for levels 2 and 3
+                    stopwords = {'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by'}
+                    for word in query_text.lower().split():
+                        if word not in stopwords and len(word) > 2:
+                            search_keywords.add(word)
+        
+        search_keywords_list = list(search_keywords)  # Convert to list for consistent ordering
+        logger.info(f"Extracted {len(search_keywords_list)} search keywords for user {user_id}")
+        
+        if search_keywords_list:
+            # Calculate semantic similarity scores based on fallback level
+            scored_semantic_places = []
             
-        except Exception as e:
-            logger.error(f"Error in semantic search: {e}")
-            # If semantic search fails, we'll just use the category/tag results
-        
-        # --- PART 3: COMBINE RESULTS ---
-        # Calculate counts for each source
-        category_tag_count = min(len(category_tag_places), int(size * 0.6))
-        semantic_count = min(len(semantic_places), size - category_tag_count)
-        
-        # Combine places with no duplicates
-        candidate_places = []
-        added_ids = set()
-        
-        # Add category/tag places first (60%)
-        for place in category_tag_places[:category_tag_count]:
-            place_id = place["_id"]
-            if place_id not in added_ids:
-                candidate_places.append(place)
-                added_ids.add(place_id)
-        
-        # Add semantic places (40%)
-        for place in semantic_places[:semantic_count]:
-            place_id = place["_id"]
-            if place_id not in added_ids and len(candidate_places) < size:
-                candidate_places.append(place)
-                added_ids.add(place_id)
-        
-        # If we don't have enough candidates, add some top-rated places
-        if len(candidate_places) < size:
-            additional_places = list(
-                places_collection.find({"_id": {"$nin": list(added_ids)}})
-                .sort([("average_rating", -1)])
-                .limit(size - len(candidate_places))
-            )
-            candidate_places.extend(additional_places)
-            logger.info(f"Added {len(additional_places)} additional places based on popularity")
-        
-        logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
-        return candidate_places
+            # Fallback level determines matching approach
+            if fallback_level == 0:
+                # Full semantic matching with spaCy word vectors
+                for place in all_places:
+                    place_id = place["_id"]
+                    
+                    # Skip if place is already highly ranked in category/tag matches
+                    if place in category_tag_places[:int(size * 0.3)]:
+                        continue
+                    
+                    # Initialize scoring components
+                    tag_similarity = 0.0
+                    tag_match_count = 0
+                    description_similarity = 0.0
+                    description_match_count = 0
+                    
+                    # Get place data
+                    tags = place.get("tags", [])
+                    description = place.get("description", "")
+                    
+                    # Process tags with nlp
+                    for keyword in search_keywords_list:
+                        keyword_doc = nlp(keyword.lower())
+                        
+                        # Check each tag for similarity
+                        for tag in tags:
+                            try:
+                                tag_doc = nlp(tag.lower())
+                                similarity = keyword_doc.similarity(tag_doc)
+                                
+                                # Count significant matches
+                                if similarity > 0.6:  # Threshold for semantic match
+                                    tag_similarity += similarity
+                                    tag_match_count += 1
+                            except Exception as e:
+                                continue  # Skip this tag if error
+                        
+                        # Process description with nlp
+                        if description:
+                            try:
+                                # Process full description
+                                desc_doc = nlp(description.lower())
+                                
+                                # Check semantic similarity
+                                similarity = keyword_doc.similarity(desc_doc)
+                                
+                                # Check exact keyword match in description (bonus)
+                                if keyword.lower() in description.lower():
+                                    description_similarity += max(similarity, 0.7)  # At least 0.7 for exact match
+                                    description_match_count += 1
+                                elif similarity > 0.5:  # Lower threshold for description
+                                    description_similarity += similarity
+                                    description_match_count += 1
+                            except Exception as e:
+                                logger.debug(f"Error comparing description: {str(e)}")
+                    
+                    # Calculate final semantic score
+                    semantic_score = 0.0
+                    
+                    # Tag component (60% weight)
+                    tag_component = 0.0
+                    if tag_match_count > 0:
+                        tag_component = (tag_similarity / tag_match_count) * 0.6
+                    
+                    # Description component (40% weight)
+                    desc_component = 0.0
+                    if description_match_count > 0:
+                        desc_component = (description_similarity / description_match_count) * 0.4
+                    
+                    # Combined score
+                    semantic_score = tag_component + desc_component
+                    
+                    # Only include if score is significant
+                    if semantic_score > 0.3:
+                        scored_semantic_places.append((place, semantic_score))
+            else:
+                # Text-based fallback matching (for fallback levels 1-3)
+                for place in all_places:
+                    # Skip if place is already highly ranked in category/tag matches
+                    if place in category_tag_places[:int(size * 0.3)]:
+                        continue
+                    
+                    match_score = 0.0
+                    tags = place.get("tags", [])
+                    description = place.get("description", "")
+                    
+                    # Tag matching (60% weight)
+                    tag_matches = 0
+                    for keyword in search_keywords_list:
+                        for tag in tags:
+                            # Exact or partial match
+                            if keyword.lower() in tag.lower() or tag.lower() in keyword.lower():
+                                tag_matches += 1
+                                break
+                    
+                    if tag_matches > 0:
+                        # Scale by ratio of matched keywords
+                        tag_score = min(1.0, tag_matches / len(search_keywords_list))
+                        match_score += tag_score * 0.6  # 60% weight
+                    
+                    # Description matching (40% weight)
+                    if description:
+                        desc_matches = 0
+                        for keyword in search_keywords_list:
+                            if keyword.lower() in description.lower():
+                                desc_matches += 1
+                        
+                        if desc_matches > 0:
+                            # Scale by ratio of matched keywords
+                            desc_score = min(1.0, desc_matches / len(search_keywords_list))
+                            match_score += desc_score * 0.4  # 40% weight
+                    
+                    if match_score > 0.2:  # Lower threshold for text matching
+                        scored_semantic_places.append((place, match_score))
+            
+            # Sort by score
+            scored_semantic_places.sort(key=lambda x: x[1], reverse=True)
+            semantic_places = [place for place, _ in scored_semantic_places]
+            logger.info(f"Found {len(semantic_places)} places via search keywords (fallback level: {fallback_level})")
         
     except Exception as e:
-        logger.error(f"Error getting candidate places: {str(e)}")
-        # Return some fallback places in case of error
-        return list(places_collection.find().sort("average_rating", -1).limit(size))
+        logger.error(f"Error in semantic search: {e}")
+        # If semantic search fails, we'll just use the category/tag results
+    
+    # --- PART 3: COMBINE RESULTS ---
+    # Calculate counts for each source
+    category_tag_count = min(len(category_tag_places), int(size * 0.6))
+    semantic_count = min(len(semantic_places), size - category_tag_count)
+    
+    # Combine places with no duplicates
+    candidate_places = []
+    added_ids = set()
+    
+    # Add category/tag places first (60%)
+    for place in category_tag_places[:category_tag_count]:
+        place_id = place["_id"]
+        if place_id not in added_ids:
+            candidate_places.append(place)
+            added_ids.add(place_id)
+    
+    # Add semantic places (40%)
+    for place in semantic_places[:semantic_count]:
+        place_id = place["_id"]
+        if place_id not in added_ids and len(candidate_places) < size:
+            candidate_places.append(place)
+            added_ids.add(place_id)
+    
+    # If we don't have enough candidates, add some top-rated places
+    if len(candidate_places) < size:
+        additional_places = list(
+            places_collection.find({"_id": {"$nin": list(added_ids)}})
+            .sort([("average_rating", -1)])
+            .limit(size - len(candidate_places))
+        )
+        candidate_places.extend(additional_places)
+        logger.info(f"Added {len(additional_places)} additional places based on popularity")
+    
+    logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
+    return candidate_places
 
-# Part 4: Collaborative Filtering and Personalization Score
+
+import math
+from datetime import datetime, timedelta
 
 def get_collaborative_recommendations(user_id):
     """
@@ -702,99 +978,6 @@ def get_discovery_places(user_id, limit=10):
         logger.error(f"Error getting discovery places: {str(e)}")
         return []
 
-# FIX #2: Missing calculate_personalization_score function
-def calculate_personalization_score(place, user_id, user_prefs):
-    """
-    Calculate personalization score for a place based on user preferences.
-    
-    Args:
-        place: Place document
-        user_id: User ID
-        user_prefs: User preferences dictionary
-        
-    Returns:
-        Personalization score between 0 and 1
-    """
-    try:
-        if not place or not user_prefs:
-            return 0.5  # Default score if missing data
-        
-        # Initialize scores
-        category_score = 0.0
-        tag_score = 0.0
-        rating_score = 0.0
-        interaction_score = 0.0
-        
-        # 1. Category matching (40% weight)
-        place_category = place.get("category", "")
-        preferred_categories = user_prefs.get("preferred_categories", [])
-        
-        if place_category and preferred_categories:
-            if place_category in preferred_categories:
-                category_score = 1.0  # Direct match
-            else:
-                # Check for partial matches
-                for category in preferred_categories:
-                    if (category.lower() in place_category.lower() or 
-                        place_category.lower() in category.lower()):
-                        category_score = 0.7  # Partial match
-                        break
-        
-        # 2. Tag matching (30% weight)
-        place_tags = place.get("tags", [])
-        preferred_tags = user_prefs.get("preferred_tags", [])
-        
-        if place_tags and preferred_tags:
-            matching_tags = set(place_tags).intersection(set(preferred_tags))
-            if matching_tags:
-                # Scale by proportion of matching tags
-                tag_score = min(1.0, len(matching_tags) / max(3, len(preferred_tags) / 2))
-        
-        # 3. Rating factor (20% weight)
-        place_rating = place.get("average_rating", 0)
-        if place_rating:
-            # Scale ratings from 0-5 to 0-1
-            rating_score = min(1.0, place_rating / 5.0)
-        
-        # 4. User interaction history (10% weight)
-        try:
-            # Count positive interactions with this place
-            interaction_count = interactions_collection.count_documents({
-                "user_id": user_id,
-                "place_id": place["_id"],
-                "interaction_type": {"$in": ["like", "save", "share", "view", "click"]}
-            })
-            
-            # Scale interaction score (cap at 5 interactions)
-            interaction_score = min(1.0, interaction_count / 5.0)
-            
-            # Check for dislikes (negative signal)
-            dislike_count = interactions_collection.count_documents({
-                "user_id": user_id,
-                "place_id": place["_id"],
-                "interaction_type": "dislike"
-            })
-            
-            if dislike_count > 0:
-                interaction_score = 0.0  # Disliked places get zero score
-        except Exception as e:
-            logger.debug(f"Error calculating interaction score: {str(e)}")
-            interaction_score = 0.0
-        
-        # Calculate final weighted score
-        final_score = (
-            category_score * 0.4 +
-            tag_score * 0.3 +
-            rating_score * 0.2 +
-            interaction_score * 0.1
-        )
-        
-        logger.debug(f"Personalization score for place {place['_id']}: {final_score}")
-        return final_score
-    except Exception as e:
-        logger.error(f"Error calculating personalization score: {str(e)}")
-        return 0.5  # Default score on error
-# Part 5: Place Ranking and Shown Places Tracking
 
 def rank_places(candidate_places, user_id):
     """
@@ -1041,9 +1224,9 @@ def refresh_shown_places(user_id, shown_place_ids, limit=10):
 
         return refreshed_places[:limit]
     except Exception as e:
-        logger.error(f"Error refreshing shown places: {str(e)}")
+        logger.error(f"Error refreshing shown places: {e}")
         return []
-# Part 6: Recommendation Generation and Caching
+# --- PART 4: RECOMMENDATION GENERATION AND CACHING ---
 
 def generate_final_recommendations(user_id, num_recommendations=10):
     """
@@ -1197,7 +1380,6 @@ def generate_final_recommendations(user_id, num_recommendations=10):
         for place in fallback_places:
             place["source"] = "error_fallback"
         return fallback_places
-
 def get_recommendations_with_caching(user_id, force_refresh=False, num_recommendations=10):
     """
     Get recommendations for a user with caching.
@@ -1316,8 +1498,7 @@ async def background_cache_recommendations(user_id, num_entries=6):
             logger.info(f"Released cache lock for user {user_id}")
         except Exception as lock_error:
             logger.error(f"Error releasing cache lock: {lock_error}")
-
-# Part 7: Roadmap Generation Functions
+# --- PART 5: ROADMAP GENERATION ---
 
 def get_seasonal_activities(month=None):
     """
@@ -1533,7 +1714,7 @@ def generate_hybrid_roadmap(user_id):
         # No fallback here - destinations are critical
         filtered_places = destination_places
         logger.info(f"After destination filter: {len(filtered_places)} places in requested destinations")
-
+    
     # --- SCORING PHASE: Score remaining places ---
     scored_places = []
     
@@ -1647,7 +1828,6 @@ def generate_hybrid_roadmap(user_id):
     
     logger.info(f"Generated roadmap with {len(roadmap['places'])} places and {len(roadmap['routes'])} routes")
     return roadmap
-# Part 8: Roadmap Utilities and API Endpoints
 
 def simplify_roadmap_to_list(roadmap_data):
     """
@@ -1757,172 +1937,7 @@ async def get_roadmap_with_caching(user_id):
         logger.error(f"Error getting roadmap with caching: {str(e)}")
         # Fallback to generating a new roadmap without caching
         return generate_hybrid_roadmap(user_id)
-
-# --- API ENDPOINTS (ROADMAP) ---
-
-@app.get("/roadmap/{user_id}")
-async def get_roadmap(user_id: str):
-    """
-    Get a travel roadmap for a specific user
-    
-    Uses caching: Only regenerates if user's travel preferences have changed
-    """
-    try:
-        logger.info(f"Roadmap request for user {user_id}")
-        
-        # Get roadmap (cached or newly generated)
-        roadmap_data = await get_roadmap_with_caching(user_id)
-        
-        # Simplify to list format
-        simplified_list = simplify_roadmap_to_list(roadmap_data)
-        
-        return {
-            "success": True, 
-            "user_id": user_id, 
-            "count": len(simplified_list),
-            "data": simplified_list,
-            "metadata": {
-                "budget_level": roadmap_data.get("budget_level"),
-                "group_type": roadmap_data.get("group_type"),
-                "start_date": roadmap_data.get("start_date"),
-                "accessibility_needs": roadmap_data.get("accessibility_needs", [])
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error generating roadmap: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
-        )
-
-@app.post("/roadmap")
-async def create_roadmap(request: RoadmapRequest):
-    """
-    Generate a new travel roadmap for a user (force regeneration)
-    """
-    try:
-        user_id = request.user_id
-        logger.info(f"Force regenerating roadmap for user {user_id}")
-        
-        # Force generation of new roadmap
-        roadmap_data = generate_hybrid_roadmap(user_id)
-        
-        # Store in cache
-        now = datetime.now()
-        travel_prefs = get_user_travel_preferences(user_id)
-        roadmaps_collection.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {
-                    "user_id": user_id,
-                    "roadmap_data": roadmap_data,
-                    "travel_preferences": travel_prefs,
-                    "created_at": now
-                }
-            },
-            upsert=True
-        )
-        
-        # Simplify to list format
-        simplified_list = simplify_roadmap_to_list(roadmap_data)
-        
-        return {
-            "success": True, 
-            "user_id": user_id, 
-            "count": len(simplified_list),
-            "data": simplified_list,
-            "metadata": {
-                "budget_level": roadmap_data.get("budget_level"),
-                "group_type": roadmap_data.get("group_type"),
-                "start_date": roadmap_data.get("start_date"),
-                "accessibility_needs": roadmap_data.get("accessibility_needs", [])
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error generating roadmap: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
-        )
-
-@app.get("/roadmap-status/{user_id}")
-async def get_roadmap_cache_status(user_id: str):
-    """
-    Get the status of the roadmap cache for a user
-    
-    Args:
-        user_id: User ID
-    """
-    try:
-        # Check if roadmap exists in cache
-        cached_roadmap = roadmaps_collection.find_one({"user_id": user_id})
-        
-        if cached_roadmap:
-            # Format created_at timestamp
-            created_at = cached_roadmap.get("created_at")
-            if created_at and not isinstance(created_at, str):
-                created_at = created_at.isoformat()
-                
-            # Get current preferences
-            current_prefs = get_user_travel_preferences(user_id)
-            cached_prefs = cached_roadmap.get("travel_preferences")
-            
-            # Compare preferences to check if they've changed
-            preferences_changed = True
-            if current_prefs and cached_prefs:
-                preferences_changed = (
-                    current_prefs.get("budget") != cached_prefs.get("budget") or
-                    current_prefs.get("accessibility_needs") != cached_prefs.get("accessibility_needs") or
-                    current_prefs.get("group_type") != cached_prefs.get("group_type") or
-                    current_prefs.get("travel_dates") != cached_prefs.get("travel_dates") or
-                    current_prefs.get("destinations") != cached_prefs.get("destinations")
-                )
-            
-            return {
-                "success": True,
-                "user_id": user_id,
-                "cache_exists": True,
-                "created_at": created_at,
-                "place_count": len(cached_roadmap.get("roadmap_data", {}).get("places", [])),
-                "preferences_changed": preferences_changed,
-                "cached_preferences": cached_prefs,
-                "current_preferences": current_prefs
-            }
-        else:
-            return {
-                "success": True,
-                "user_id": user_id,
-                "cache_exists": False
-            }
-    except Exception as e:
-        logger.error(f"Error getting roadmap cache status: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
-        )
-
-@app.delete("/roadmap/{user_id}")
-async def clear_roadmap_cache(user_id: str):
-    """
-    Clear the roadmap cache for a specific user
-    """
-    try:
-        result = roadmaps_collection.delete_one({"user_id": user_id})
-        deleted = result.deleted_count > 0
-        
-        return {
-            "success": True,
-            "user_id": user_id,
-            "cache_cleared": deleted
-        }
-    except Exception as e:
-        logger.error(f"Error clearing roadmap cache: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
-        )
-
-# Part 9: Recommendation API Endpoints
+# --- PART 6: API ENDPOINTS (RECOMMENDATIONS) ---
 
 @app.get("/")
 async def root():
@@ -2164,7 +2179,7 @@ async def clear_cache(user_id: str):
         )
 
 @app.delete("/shown-places/{user_id}")
-async def reset_shown_places_endpoint(user_id: str):
+async def reset_shown_places(user_id: str):
     """Reset all shown places for a user"""
     try:
         result = shown_places_collection.delete_many({"user_id": user_id})
@@ -2216,8 +2231,7 @@ async def get_user_shown_places(user_id: str):
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
-# Part 10: Search, Place Endpoints, Diagnostics and Error Handlers
+# --- PART 7: API ENDPOINTS (SEARCH AND ROADMAP) ---
 
 @app.get("/search/{user_id}")
 async def search_places(
@@ -2393,16 +2407,16 @@ async def get_search_history(
         history = list(
             search_queries_collection.find(
                 {"user_id": user_id},
-            ).sort("timestamp", -1).limit(limit)
+                {"_id": 0, "user_id": 1, "query": 1, "timestamp": 1}
+            )
+            .sort("timestamp", -1)
+            .limit(limit)
         )
         
         # Format timestamps
         for item in history:
             if "timestamp" in item and not isinstance(item["timestamp"], str):
                 item["timestamp"] = item["timestamp"].isoformat()
-            
-            # Remove MongoDB _id
-            item.pop("_id", None)
         
         return {
             "success": True,
@@ -2410,12 +2424,205 @@ async def get_search_history(
             "count": len(history),
             "history": history
         }
+        
     except Exception as e:
         logger.error(f"Error getting search history: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}
         )
+
+@app.delete("/search-history/{user_id}")
+async def clear_search_history(user_id: str):
+    """
+    Clear search history for a user
+    
+    Args:
+        user_id: User ID
+    """
+    try:
+        result = search_queries_collection.delete_many({"user_id": user_id})
+        deleted_count = result.deleted_count
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} search history records for user {user_id}"
+        }
+    except Exception as e:
+        logger.error(f"Error clearing search history: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+# --- Roadmap API Endpoints ---
+
+@app.get("/roadmap/{user_id}")
+async def get_roadmap(user_id: str):
+    """
+    Get a travel roadmap for a specific user
+    
+    Uses caching: Only regenerates if user's travel preferences have changed
+    """
+    try:
+        logger.info(f"Roadmap request for user {user_id}")
+        
+        # Get roadmap (cached or newly generated)
+        roadmap_data = await get_roadmap_with_caching(user_id)
+        
+        # Simplify to list format
+        simplified_list = simplify_roadmap_to_list(roadmap_data)
+        
+        return {
+            "success": True, 
+            "user_id": user_id, 
+            "count": len(simplified_list),
+            "data": simplified_list,
+            "metadata": {
+                "budget_level": roadmap_data.get("budget_level"),
+                "group_type": roadmap_data.get("group_type"),
+                "start_date": roadmap_data.get("start_date"),
+                "accessibility_needs": roadmap_data.get("accessibility_needs", [])
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error generating roadmap: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.post("/roadmap")
+async def create_roadmap(request: RoadmapRequest):
+    """
+    Generate a new travel roadmap for a user (force regeneration)
+    """
+    try:
+        user_id = request.user_id
+        logger.info(f"Force regenerating roadmap for user {user_id}")
+        
+        # Force generation of new roadmap
+        roadmap_data = generate_hybrid_roadmap(user_id)
+        
+        # Store in cache
+        now = datetime.now()
+        travel_prefs = get_user_travel_preferences(user_id)
+        roadmaps_collection.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "user_id": user_id,
+                    "roadmap_data": roadmap_data,
+                    "travel_preferences": travel_prefs,
+                    "created_at": now
+                }
+            },
+            upsert=True
+        )
+        
+        # Simplify to list format
+        simplified_list = simplify_roadmap_to_list(roadmap_data)
+        
+        return {
+            "success": True, 
+            "user_id": user_id, 
+            "count": len(simplified_list),
+            "data": simplified_list,
+            "metadata": {
+                "budget_level": roadmap_data.get("budget_level"),
+                "group_type": roadmap_data.get("group_type"),
+                "start_date": roadmap_data.get("start_date"),
+                "accessibility_needs": roadmap_data.get("accessibility_needs", [])
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error generating roadmap: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.get("/roadmap-status/{user_id}")
+async def get_roadmap_cache_status(user_id: str):
+    """
+    Get the status of the roadmap cache for a user
+    
+    Args:
+        user_id: User ID
+    """
+    try:
+        # Check if roadmap exists in cache
+        cached_roadmap = roadmaps_collection.find_one({"user_id": user_id})
+        
+        if cached_roadmap:
+            # Format created_at timestamp
+            created_at = cached_roadmap.get("created_at")
+            if created_at and not isinstance(created_at, str):
+                created_at = created_at.isoformat()
+                
+            # Get current preferences
+            current_prefs = get_user_travel_preferences(user_id)
+            cached_prefs = cached_roadmap.get("travel_preferences")
+            
+            # Compare preferences to check if they've changed
+            preferences_changed = True
+            if current_prefs and cached_prefs:
+                preferences_changed = (
+                    current_prefs.get("budget") != cached_prefs.get("budget") or
+                    current_prefs.get("accessibility_needs") != cached_prefs.get("accessibility_needs") or
+                    current_prefs.get("group_type") != cached_prefs.get("group_type") or
+                    current_prefs.get("travel_dates") != cached_prefs.get("travel_dates") or
+                    current_prefs.get("destinations") != cached_prefs.get("destinations")
+                )
+            
+            return {
+                "success": True,
+                "user_id": user_id,
+                "cache_exists": True,
+                "created_at": created_at,
+                "place_count": len(cached_roadmap.get("roadmap_data", {}).get("places", [])),
+                "preferences_changed": preferences_changed,
+                "cached_preferences": cached_prefs,
+                "current_preferences": current_prefs
+            }
+        else:
+            return {
+                "success": True,
+                "user_id": user_id,
+                "cache_exists": False
+            }
+    except Exception as e:
+        logger.error(f"Error getting roadmap cache status: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+
+@app.delete("/roadmap/{user_id}")
+async def clear_roadmap_cache(user_id: str):
+    """
+    Clear the roadmap cache for a specific user
+    """
+    try:
+        result = roadmaps_collection.delete_one({"user_id": user_id})
+        deleted = result.deleted_count > 0
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "cache_cleared": deleted
+        }
+    except Exception as e:
+        logger.error(f"Error clearing roadmap cache: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "error": str(e)}
+        )
+# --- PART 8: ERROR HANDLERS AND SERVER STARTUP ---
+
+# --- Place and User Endpoints ---
 
 @app.get("/place/{place_id}")
 async def get_place(place_id: str):
@@ -2566,7 +2773,7 @@ async def test_nlp():
                 "success": False,
                 "error": "NLP model does not have word vectors",
                 "model": getattr(nlp, "name", str(type(nlp).__name__)),
-                "fallback_active": isinstance(nlp, DummyNLP)  # Fixed reference to DummyNLP
+                "fallback_active": isinstance(nlp, type) and nlp.__name__ == "DummyNLP"
             }
             
         # Test word similarity pairs
@@ -2615,17 +2822,38 @@ async def not_found_exception_handler(request: Request, exc):
 async def server_exception_handler(request: Request, exc):
     return JSONResponse(
         status_code=500,
-        content={
-            "success": False,
-            "error": f"Internal server error: {str(exc)}"
-        }
+        content={"success": False, "error": "Internal server error"}
     )
 
-# Run the app with Uvicorn when executed directly
+# --- Server Startup ---
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8000"))
-    host = os.getenv("HOST", "0.0.0.0")
-    uvicorn.run("main:app", host=host, port=port, reload=True)
-
-
+    
+    # Check environment for port
+    port = int(os.environ.get("PORT", 8000))
+    
+    # Log startup information
+    logger.info("=" * 50)
+    logger.info("Starting Travel API Server v2.0.0")
+    logger.info(f"Using port: {port}")
+    
+    # Check MongoDB connection
+    try:
+        client.server_info()
+        logger.info("✅ MongoDB connection verified")
+        
+        # Log collection counts
+        for coll_name in ["users", "places", "recommendations_cache"]:
+            count = db[coll_name].count_documents({})
+            logger.info(f"Collection {coll_name}: {count} documents")
+    except Exception as e:
+        logger.error(f"❌ MongoDB connection failed: {e}")
+        
+    # Log NLP model status
+    has_vectors = nlp.vocab.vectors.n_keys > 0
+    logger.info(f"NLP Model: {getattr(nlp, 'name', type(nlp).__name__)}")
+    logger.info(f"Word Vectors: {'Available' if has_vectors else 'NOT AVAILABLE'}")
+    logger.info("=" * 50)
+    
+    # Run the server
+    uvicorn.run(app, host="0.0.0.0", port=port)

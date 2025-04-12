@@ -1770,35 +1770,55 @@ def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recom
                 if len(cached_entries) <= 2:
                     logger.info(f"Only {len(cached_entries)} cached entries left for user {user_id}, scheduling more")
                 
-                # Filter cached recommendations to remove previously shown places if possible
-                filtered_recommendations = [r for r in cached_entry["recommendations"] 
-                                           if r["_id"] not in previously_shown_ids]
+                # Filter cached recommendations to ensure they haven't been shown before
+                filtered_cache = []
+                for place in cached_entry["recommendations"]:
+                    if place["_id"] not in previously_shown_ids:
+                        filtered_cache.append(place)
                 
-                # If we don't have enough after filtering, use original cached recommendations
-                if len(filtered_recommendations) >= num_new_recommendations:
-                    new_recommendations = filtered_recommendations[:num_new_recommendations]
+                # If we filtered too many, generate new ones
+                if len(filtered_cache) >= num_new_recommendations:
+                    new_recommendations = filtered_cache[:num_new_recommendations]
                 else:
-                    logger.info(f"Not enough new places in cache after filtering, using original cache")
-                    new_recommendations = cached_entry["recommendations"][:num_new_recommendations]
+                    # Not enough from cache after filtering, generate new ones
+                    logger.info(f"Only {len(filtered_cache)} new places in cache after filtering, generating more")
+                    additional_needed = num_new_recommendations - len(filtered_cache)
+                    
+                    # Add what we have from cache
+                    new_recommendations = filtered_cache.copy()
+                    
+                    # Generate more to supplement
+                    existing_ids = [p["_id"] for p in new_recommendations]
+                    additional_recs = generate_final_recommendations(
+                        user_id, 
+                        additional_needed, 
+                        previously_shown_ids + existing_ids
+                    )
+                    
+                    # Add the additional recommendations
+                    new_recommendations.extend(additional_recs)
         
         # Get the IDs of new recommendations
         new_place_ids = [p["_id"] for p in new_recommendations]
         
-        # Get previously shown places for history display
+        # Get previously shown places for history display (most recent N, excluding new places)
         previously_shown_places = []
         if history_count > 0:
-            # Get most recent previously shown places, excluding what we're about to show
+            # Filter out places we're showing as new
             shown_ids_to_fetch = [pid for pid in previously_shown_ids if pid not in new_place_ids]
             
-            # Get the most recent ones (at the end of the list)
-            shown_ids_to_fetch = shown_ids_to_fetch[-history_count:] if shown_ids_to_fetch else []
-            
+            # Get the most recent ones based on history_count (from end of list)
             if shown_ids_to_fetch:
-                previously_shown_places = list(places_collection.find({"_id": {"$in": shown_ids_to_fetch}}))
+                # Get the most recent items (last N items in the list)
+                shown_ids_to_fetch = shown_ids_to_fetch[-history_count:]
                 
-                # Add source information
-                for place in previously_shown_places:
-                    place["source"] = "history"
+                # Fetch the actual place data
+                if shown_ids_to_fetch:
+                    previously_shown_places = list(places_collection.find({"_id": {"$in": shown_ids_to_fetch}}))
+                    
+                    # Add source information
+                    for place in previously_shown_places:
+                        place["source"] = "history"
         
         # Track these new recommendations as shown
         update_shown_places(user_id, new_place_ids, max_places=100)

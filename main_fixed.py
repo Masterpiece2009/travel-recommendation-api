@@ -1495,14 +1495,15 @@ def refresh_shown_places(user_id, shown_place_ids, limit=10):
         logger.error(f"Error refreshing shown places: {e}")
         return []
 # --- PART 4: RECOMMENDATION GENERATION AND CACHING ---
-def generate_final_recommendations(user_id, num_recommendations=10):
+def generate_final_recommendations(user_id, num_recommendations=10, previously_shown_ids=None):
     """
     Generate final personalized recommendations for a user.
-    Enhanced with collaborative filtering (40% of recommendations).
+    Enhanced with collaborative filtering (40% of recommendations) and explicit tracking of shown places.
     
     Args:
         user_id: User ID
         num_recommendations: Number of recommendations to generate
+        previously_shown_ids: List of previously shown place IDs to exclude
         
     Returns:
         List of personalized recommendations
@@ -1513,10 +1514,10 @@ def generate_final_recommendations(user_id, num_recommendations=10):
         # Get user preferences
         user_prefs = get_user_travel_preferences(user_id)
         
-        # Get previously shown places
-        previously_shown = shown_places_collection.find_one({"user_id": user_id})
-        previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
-        last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
+        # Use provided previously_shown_ids or fetch them if not provided
+        if previously_shown_ids is None:
+            previously_shown = shown_places_collection.find_one({"user_id": user_id})
+            previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
         
         # Initialize recommendations
         recommendations = []
@@ -1532,76 +1533,56 @@ def generate_final_recommendations(user_id, num_recommendations=10):
             # Log the total number of collaborative recommendations found
             logger.info(f"Found {len(collab_places_ids)} collaborative recommendations for user {user_id}")
             
-            # FIX 1: Always get place details for collaborative recommendations
+            # Filter out previously shown places
+            collab_places_ids = [pid for pid in collab_places_ids if pid not in previously_shown_ids]
+            
+            # Get place details for remaining collaborative recommendations
             if collab_places_ids:
-                # Get all collaborative place details first
+                # Get all collaborative place details
                 all_collab_places = list(places_collection.find({"_id": {"$in": collab_places_ids}}))
                 
                 # Sort collaborative recommendations by rating for consistency
                 all_collab_places.sort(key=lambda x: x.get("average_rating", 0), reverse=True)
                 
-                # FIX 2: Split into new and previously shown
-                new_collab_places = [p for p in all_collab_places if p["_id"] not in previously_shown_ids]
-                shown_collab_places = [p for p in all_collab_places if p["_id"] in previously_shown_ids]
-                
-                # Use new places first
-                collab_to_add = new_collab_places[:collab_count]
-                
-                # FIX 3: If we don't have enough new recommendations, add some previously shown ones
-                if len(collab_to_add) < collab_count and shown_collab_places:
-                    # How many more do we need?
-                    remaining_collab = collab_count - len(collab_to_add)
-                    # Add previously shown collaborative items as needed
-                    collab_to_add.extend(shown_collab_places[:remaining_collab])
+                # Use top collaborative places up to our limit
+                collab_to_add = all_collab_places[:collab_count]
                 
                 # Add collaborative places
                 for place in collab_to_add:
                     place["source"] = "collaborative"
-                    # FIX 4: Check if not already added (defensive programming)
-                    if place["_id"] not in [r["_id"] for r in recommendations]:
-                        recommendations.append(place)
+                    recommendations.append(place)
                 
                 logger.info(f"Added {len(collab_to_add)} collaborative filtering recommendations")
             else:
-                logger.info("No collaborative recommendations available")
+                logger.info("No new collaborative recommendations available")
         
-        # PART 3: Get remaining content-based recommendations (60% or more if collaborative failed)
+        # PART 3: Get content-based recommendations (60% or more if collaborative failed)
         remaining_content_count = num_recommendations - len(recommendations)
         
         if remaining_content_count > 0:
             # Get candidate places
-            # FIX 5: Increase the multiplier to ensure we have enough candidates
             candidate_places = get_candidate_places(user_prefs, user_id, size=remaining_content_count * 5)
             
-            # Apply personalization factors
+            # Filter out previously shown places and already added recommendations
+            filtered_candidates = []
+            for place in candidate_places:
+                if place["_id"] not in previously_shown_ids and place["_id"] not in [r["_id"] for r in recommendations]:
+                    filtered_candidates.append(place)
+            
+            # Apply personalization factors to remaining candidates
             ranked_places = []
             
-            for place in candidate_places:
-                # Skip if already in recommendations
-                if place["_id"] in [r["_id"] for r in recommendations]:
-                    continue
-                
-                # FIX 6: Don't skip previously shown places here, just rank them lower
-                previously_shown_penalty = 0
-                if place["_id"] in previously_shown_ids:
-                    # Add a penalty for previously shown places, but still consider them
-                    previously_shown_penalty = 0.2
-                    
-                    # Higher penalty for recently shown places
-                    if place["_id"] in last_shown_ids:
-                        previously_shown_penalty = 0.4
-                
+            for place in filtered_candidates:
                 # Calculate personalization score
-                score = calculate_personalization_score(place, user_id, user_prefs) - previously_shown_penalty
+                score = calculate_personalization_score(place, user_id, user_prefs)
                 ranked_places.append((place, score))
             
             # Sort places by personalization score
             ranked_places.sort(key=lambda x: x[1], reverse=True)
-            ranked_places = [place for place, _ in ranked_places]
             
-            # Add ranked places up to the limit
+            # Add top content-based places
             added_content_places = 0
-            for place in ranked_places:
+            for place, _ in ranked_places:
                 if len(recommendations) < num_recommendations:
                     place["source"] = "content_based"
                     recommendations.append(place)
@@ -1611,51 +1592,95 @@ def generate_final_recommendations(user_id, num_recommendations=10):
             
             logger.info(f"Added {added_content_places} content-based places")
         
-        # PART 4: If we still need more recommendations (e.g., if user has seen all places)
+        # PART 4: FALLBACK 1 - Discovery places if we still need more
         if len(recommendations) < num_recommendations:
             remaining_needed = num_recommendations - len(recommendations)
-            logger.info(f"Still need {remaining_needed} more recommendations, considering already shown places")
-            
-            # Get random places from those already shown (but not from the last request)
-            already_shown_excluded_last = [pid for pid in previously_shown_ids if pid not in last_shown_ids]
-            
-            if already_shown_excluded_last:
-                # Get places by ID
-                random.shuffle(already_shown_excluded_last)
-                place_ids_to_use = already_shown_excluded_last[:remaining_needed]
-                reused_places = list(places_collection.find({"_id": {"$in": place_ids_to_use}}))
-                
-                added_reused_places = 0
-                for place in reused_places:
-                    if place["_id"] not in [r["_id"] for r in recommendations]:  # Defensive check
-                        place["source"] = "reused"
-                        recommendations.append(place)
-                        added_reused_places += 1
-                
-                logger.info(f"Added {added_reused_places} reused places")
-        
-        # PART 5: Last resort - if still not enough, add discovery places
-        if len(recommendations) < num_recommendations:
-            remaining_needed = num_recommendations - len(recommendations)
-            logger.info(f"Still need {remaining_needed} more recommendations, adding discovery places")
+            logger.info(f"Need {remaining_needed} more recommendations, adding discovery places")
             
             discovery_places = get_discovery_places(user_id, limit=remaining_needed * 2)  # Get extra for filtering
-            filtered_discoveries = [p for p in discovery_places if p["_id"] not in [r["_id"] for r in recommendations]]
+            
+            # Filter out already shown/added places
+            filtered_discoveries = []
+            for place in discovery_places:
+                if place["_id"] not in previously_shown_ids and place["_id"] not in [r["_id"] for r in recommendations]:
+                    filtered_discoveries.append(place)
             
             added_discovery_places = 0
-            for place in filtered_discoveries[:remaining_needed]:  # Limit to what we need
+            for place in filtered_discoveries[:remaining_needed]:
                 place["source"] = "discovery"
                 recommendations.append(place)
                 added_discovery_places += 1
             
             logger.info(f"Added {added_discovery_places} discovery places")
         
-        # PART 6: Absolute last resort - add any places at all
+        # PART 5: FALLBACK 2 - Trending places based on recent interactions
         if len(recommendations) < num_recommendations:
             remaining_needed = num_recommendations - len(recommendations)
-            logger.info(f"Still need {remaining_needed} more recommendations, adding any available places")
+            logger.info(f"Need {remaining_needed} more recommendations, adding trending places")
             
-            # FIX 7: Exclude places already in recommendations
+            # Get recent interactions to find trending places
+            recent_date = datetime.now() - timedelta(days=7)
+            trending_interactions = list(interactions_collection.aggregate([
+                {"$match": {"timestamp": {"$gte": recent_date}}},
+                {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": remaining_needed * 2}
+            ]))
+            
+            trending_place_ids = [item["_id"] for item in trending_interactions]
+            
+            # Filter out already shown places
+            trending_place_ids = [pid for pid in trending_place_ids 
+                                if pid not in previously_shown_ids and 
+                                   pid not in [r["_id"] for r in recommendations]]
+            
+            # Get place details
+            if trending_place_ids:
+                trending_places = list(places_collection.find({"_id": {"$in": trending_place_ids}}))
+                
+                added_trending_places = 0
+                for place in trending_places[:remaining_needed]:
+                    place["source"] = "trending"
+                    recommendations.append(place)
+                    added_trending_places += 1
+                
+                logger.info(f"Added {added_trending_places} trending places")
+        
+        # PART 6: FINAL FALLBACK - Reuse previously shown places if we have no choice
+        if len(recommendations) < num_recommendations and previously_shown_ids:
+            remaining_needed = num_recommendations - len(recommendations)
+            logger.info(f"Need {remaining_needed} more recommendations, reusing previously shown places")
+            
+            # Sort previously shown by recency (oldest first) to prioritize less recently shown places
+            previously_shown_place_ids = previously_shown_ids.copy()
+            
+            # Filter out places already in recommendations
+            current_rec_ids = [r["_id"] for r in recommendations]
+            previously_shown_place_ids = [pid for pid in previously_shown_place_ids if pid not in current_rec_ids]
+            
+            # Reverse to prioritize older places (beginning of the list) that haven't been seen recently
+            previously_shown_place_ids.reverse()
+            
+            # Get place details
+            if previously_shown_place_ids:
+                reuse_places = list(places_collection.find(
+                    {"_id": {"$in": previously_shown_place_ids[:remaining_needed]}}
+                ))
+                
+                added_reuse_places = 0
+                for place in reuse_places:
+                    place["source"] = "reused"
+                    recommendations.append(place)
+                    added_reuse_places += 1
+                
+                logger.info(f"Added {added_reuse_places} reused places")
+        
+        # PART 7: ABSOLUTE LAST RESORT - Any places at all
+        if len(recommendations) < num_recommendations:
+            remaining_needed = num_recommendations - len(recommendations)
+            logger.info(f"Need {remaining_needed} more recommendations, adding any available places")
+            
+            # Exclude places already in recommendations
             current_rec_ids = [r["_id"] for r in recommendations]
             last_resort_places = list(places_collection.find(
                 {"_id": {"$nin": current_rec_ids}}
@@ -1668,10 +1693,6 @@ def generate_final_recommendations(user_id, num_recommendations=10):
                 added_fallback_places += 1
             
             logger.info(f"Added {added_fallback_places} fallback places")
-        
-        # Track the shown places
-        new_place_ids = [place["_id"] for place in recommendations]
-        update_shown_places(user_id, new_place_ids, max_places=100)
         
         logger.info(f"Generated {len(recommendations)} total recommendations for user {user_id}")
         return recommendations

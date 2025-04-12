@@ -1,5 +1,3 @@
-# --- PART 1: IMPORTS AND CONFIGURATION ---
-
 import os
 import json
 import logging
@@ -19,6 +17,36 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sklearn.preprocessing import MinMaxScaler
 from geopy.distance import geodesic
+
+# Define DummyNLP in global scope for fallback
+class DummyNLP:
+    def __init__(self):
+        self.name = "DummyNLP-Fallback"
+        self.vocab = type('obj', (object,), {
+            'vectors': type('obj', (object,), {'n_keys': 0})
+        })
+        
+    def __call__(self, text):
+        class DummyDoc:
+            def __init__(self, text):
+                self.text = text
+                self.vector = [0] * 300  # Empty vector
+                self.vector_norm = 0
+                
+            def similarity(self, other):
+                # Fallback similarity using Jaccard index on word overlap
+                words1 = set(self.text.lower().split())
+                words2 = set(other.text.lower().split())
+                
+                if not words1 or not words2:
+                    return 0
+                    
+                intersection = words1.intersection(words2)
+                union = words1.union(words2)
+                
+                return len(intersection) / len(union)
+        
+        return DummyDoc(text)
 
 # Configure logging with more detailed format
 logging.basicConfig(
@@ -165,37 +193,7 @@ def load_spacy_model(model="en_core_web_md", retries=2):  # Use medium model by 
             except Exception as download_err:
                 logger.error(f"❌ Failed to download model: {download_err}")
 
-    # Return dummy NLP object as fallback with clear logging
-    class DummyNLP:
-        def __init__(self):
-            self.name = "DummyNLP-Fallback"
-            self.vocab = type('obj', (object,), {
-                'vectors': type('obj', (object,), {'n_keys': 0})
-            })
-            logger.critical("⛔ CRITICAL: Using dummy NLP model! Semantic search will NOT work properly.")
-            
-        def __call__(self, text):
-            class DummyDoc:
-                def __init__(self, text):
-                    self.text = text
-                    self.vector = [0] * 300  # Empty vector
-                    self.vector_norm = 0
-                    
-                def similarity(self, other):
-                    # Fallback similarity using Jaccard index on word overlap
-                    words1 = set(self.text.lower().split())
-                    words2 = set(other.text.lower().split())
-                    
-                    if not words1 or not words2:
-                        return 0
-                        
-                    intersection = words1.intersection(words2)
-                    union = words1.union(words2)
-                    
-                    return len(intersection) / len(union)
-            
-            return DummyDoc(text)
-    
+    # Return dummy NLP object from the global class
     logger.warning("⚠️ CRITICAL: Using dummy NLP model as fallback! Semantic search will use word overlap instead.")
     return DummyNLP()
 
@@ -211,7 +209,6 @@ if has_vectors:
     logger.info("✅ SUCCESS: NLP Model loaded with WORD VECTORS - semantic search will work properly")
 else:
     logger.warning("⚠️ WARNING: NLP Model doesn't have word vectors - semantic search will use fallback algorithm")
-
 # Initialize FastAPI app
 app = FastAPI(
     title="Travel API",

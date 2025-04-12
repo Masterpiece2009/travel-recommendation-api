@@ -541,22 +541,74 @@ def get_candidate_places(user_preferences, user_id, size=30):
     
     for place in all_places:
         score = 0.0
-        place_category = place.get("category", "")
-        place_tags = place.get("tags", []) if isinstance(place.get("tags"), list) else []
+        place_category = place.get("category", "").lower() if place.get("category") else ""
+        place_tags = [tag.lower() for tag in place.get("tags", [])] if isinstance(place.get("tags"), list) else []
         
-        # 1. Category matching (70% weight)
-        if place_category and place_category in preferred_categories:
-            score += 0.7
-            logger.debug(f"Category match for place {place.get('name')}: {place_category}")
+        # 1. Category matching (70% weight) - ENHANCED with fuzzy matching
+        if place_category:
+            # Check for exact match first
+            if preferred_categories and any(cat.lower() == place_category for cat in preferred_categories):
+                score += 0.7
+                logger.debug(f"Exact category match for place {place.get('name')}: {place_category}")
+            else:
+                # Check for partial/substring matches
+                for pref_cat in preferred_categories:
+                    pref_cat_lower = pref_cat.lower()
+                    # Check if categories contain each other
+                    if (pref_cat_lower in place_category or 
+                        place_category in pref_cat_lower or
+                        place_category.split()[0] in pref_cat_lower or  # First word match
+                        pref_cat_lower.split()[0] in place_category):   # First word match
+                        score += 0.5  # Lower score for partial match
+                        logger.debug(f"Partial category match for place {place.get('name')}: {place_category} ≈ {pref_cat}")
+                        break
+                    
+                    # Check for word-level similarity
+                    place_cat_words = set(place_category.split())
+                    pref_cat_words = set(pref_cat_lower.split())
+                    common_words = place_cat_words.intersection(pref_cat_words)
+                    
+                    if common_words:
+                        # Score based on word overlap
+                        overlap_ratio = len(common_words) / len(place_cat_words.union(pref_cat_words))
+                        if overlap_ratio >= 0.3:  # At least 30% word overlap
+                            cat_score = 0.4 * overlap_ratio  # Scale from 0.12 to 0.4
+                            score += cat_score
+                            logger.debug(f"Word overlap in category for place {place.get('name')}: {place_category} ~ {pref_cat}, score: {cat_score:.2f}")
+                            break
         
-        # 2. Tag matching (up to 60% weight)
-        matching_tags = [tag for tag in place_tags if tag in preferred_tags]
-        if matching_tags:
+        # 2. Tag matching (up to 60% weight) - ENHANCED with fuzzy matching
+        # Check for exact tag matches first
+        exact_matching_tags = [tag for tag in place_tags if tag in [t.lower() for t in preferred_tags]]
+        if exact_matching_tags:
             # Base score of 0.3 for any tag match, plus up to 0.3 more based on % of tags matched
-            tag_ratio = len(matching_tags) / (len(preferred_tags) or 1)  # Avoid division by zero
+            tag_ratio = len(exact_matching_tags) / (len(preferred_tags) or 1)  # Avoid division by zero
             tag_score = min(0.6, 0.3 + (0.3 * tag_ratio))  # Cap at 0.6
             score += tag_score
-            logger.debug(f"Tag matches for place {place.get('name')}: {matching_tags}, score: {tag_score:.2f}")
+            logger.debug(f"Exact tag matches for place {place.get('name')}: {exact_matching_tags}, score: {tag_score:.2f}")
+        
+        # Check for partial tag matches if no exact matches
+        elif place_tags and preferred_tags:
+            partial_matches = 0
+            for place_tag in place_tags:
+                for pref_tag in preferred_tags:
+                    pref_tag_lower = pref_tag.lower()
+                    
+                    # Check for substring match
+                    if (place_tag in pref_tag_lower or 
+                        pref_tag_lower in place_tag or
+                        # First word match for multi-word tags
+                        (place_tag.split()[0] in pref_tag_lower if ' ' in place_tag else False) or
+                        (pref_tag_lower.split()[0] in place_tag if ' ' in pref_tag_lower else False)):
+                        partial_matches += 1
+                        break
+            
+            if partial_matches > 0:
+                # Score partial matches with a lower weight
+                partial_ratio = partial_matches / (len(preferred_tags) or 1)
+                partial_tag_score = min(0.4, 0.2 + (0.2 * partial_ratio))  # Cap at 0.4 for partial matches
+                score += partial_tag_score
+                logger.debug(f"Partial tag matches for place {place.get('name')}, score: {partial_tag_score:.2f}")
         
         # Only consider if there's any match
         if score > 0:
@@ -600,7 +652,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
         
         # Extract keywords from search queries with appropriate fallbacks
         search_keywords = set()
-        
+
         for query_doc in search_queries:
             # Use existing keywords if available
             if "keywords" in query_doc and query_doc["keywords"]:
@@ -701,7 +753,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
                                     description_match_count += 1
                             except Exception as e:
                                 logger.debug(f"Error comparing description: {str(e)}")
-                    
+
                     # Calculate final semantic score
                     semantic_score = 0.0
                     
@@ -805,6 +857,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
     
     logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
     return candidate_places
+
 
 
 import math

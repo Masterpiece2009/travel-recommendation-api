@@ -509,14 +509,13 @@ def store_cache_entry(user_id, recommendations, sequence):
         return False
 # --- PART 3: RECOMMENDATION ALGORITHM FUNCTIONS ---
 
-# --- Recommendation System: Core Functions ---
 def get_candidate_places(user_preferences, user_id, size=30):
     """
     Get candidate places for recommendations based on user preferences.
     Enhanced with improved semantic search for matching places to user preferences.
     
     Args:
-        user_preferences: Dictionary containing preferred_categories and preferred_tags
+        user_preferences: Dictionary containing user preferences
         user_id: User ID for fetching search history and interactions
         size: Maximum number of candidate places to return
         
@@ -525,14 +524,31 @@ def get_candidate_places(user_preferences, user_id, size=30):
     """
     logger.info(f"Finding candidate places for user {user_id}")
     
-    if not user_preferences:
+    # FIXED: Extract user preferences from correct structure
+    # Check both possible structures to make the function more robust
+    if user_preferences:
+        # Try to get from both possible structures
+        preferred_categories = (
+            user_preferences.get("preferred_categories", []) or  # Try the old expected structure
+            user_preferences.get("categories", [])               # Try the actual structure in DB
+        )
+        
+        preferred_tags = (
+            user_preferences.get("preferred_tags", []) or  # Try the old expected structure
+            user_preferences.get("tags", [])               # Try the actual structure in DB
+        )
+    else:
+        # If user_preferences is None/empty, use empty lists
+        preferred_categories = []
+        preferred_tags = []
+    
+    # Log preferences with the correct structure
+    logger.info(f"User preferences - Categories: {preferred_categories}, Tags: {preferred_tags}")
+    
+    # If no preferences, return popular places
+    if not preferred_categories and not preferred_tags:
         logger.warning(f"No user preferences found for user {user_id}, returning popular places")
         return list(places_collection.find().sort([("average_rating", -1)]).limit(size))
-    
-    # Extract user preferences
-    preferred_categories = user_preferences.get("preferred_categories", [])
-    preferred_tags = user_preferences.get("preferred_tags", [])
-    
     # Log preferences
     logger.info(f"User preferences - Categories: {preferred_categories}, Tags: {preferred_tags}")
     

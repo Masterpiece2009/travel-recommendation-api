@@ -61,9 +61,9 @@ try:
     logger.info("Created TTL index on roadmaps collection")
 except Exception as e:
     logger.error(f"Error creating TTL index on roadmaps collection: {e}")
-
+    
 # --- Initialize spaCy model ---
-def load_spacy_model(model="en_core_web_sm", retries=2):
+def load_spacy_model(model = "en_core_web_md" retries=2):
     """Attempts to load the spaCy model, downloading it if necessary."""
     for attempt in range(retries):
         try:

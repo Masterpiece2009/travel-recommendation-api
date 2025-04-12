@@ -2382,7 +2382,8 @@ async def health_check():
 async def get_recommendations(
     user_id: str,
     num: int = Query(10, ge=1, le=50),
-    force_refresh: bool = Query(False)
+    force_refresh: bool = Query(False),
+    background_tasks: BackgroundTasks = None
 ):
     """
     Get recommendations for a user
@@ -2393,19 +2394,34 @@ async def get_recommendations(
         force_refresh: Whether to force fresh recommendations
     """
     try:
-        if force_refresh:
-            # Generate fresh recommendations
-            recommendations = generate_final_recommendations(user_id, num)
-        else:
-            # Use cached recommendations if available
-            recommendations = get_recommendations_with_caching(user_id, force_refresh=False, num_recommendations=num)
+        # Get recommendations with the enhanced caching system
+        # We'll use the num parameter for both new recommendations and max_total
+        # This maintains backward compatibility while using the improved function
+        recommendation_data = get_recommendations_with_caching(
+            user_id, 
+            force_refresh=force_refresh, 
+            num_new_recommendations=int(num * 0.5),  # About half will be new
+            max_total=num  # Total remains the same as requested
+        )
         
+        # Combine new and previously shown recommendations
+        all_recommendations = recommendation_data["new_recommendations"] + recommendation_data["previously_shown"]
+        
+        # Check if we need to regenerate cache
+        if background_tasks:
+            cache_count = recommendations_cache_collection.count_documents({"user_id": user_id})
+            if cache_count < 4:
+                # Schedule cache regeneration in background
+                logger.info(f"Cache count low ({cache_count}), scheduling regeneration")
+                background_tasks.add_task(background_cache_recommendations, user_id, 6)
+        
+        # Return recommendations in the original format
         return {
             "success": True,
             "user_id": user_id,
-            "count": len(recommendations),
-            "recommendations": recommendations,
-            "cache_used": not force_refresh
+            "count": len(all_recommendations),
+            "recommendations": all_recommendations,
+            "cache_used": not force_refresh and len(recommendation_data["new_recommendations"]) > 0
         }
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")

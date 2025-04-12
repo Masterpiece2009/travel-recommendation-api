@@ -2603,8 +2603,7 @@ async def get_recommendations(
         recommendation_data = get_recommendations_with_caching(
             user_id, 
             force_refresh=force_refresh, 
-            num_new_recommendations=num,  # Number of new recommendations to fetch
-            max_total=max(30, num * 3)  # Ensure we have enough capacity for history
+            num_new_recommendations=num
         )
         
         # Combine new and previously shown recommendations

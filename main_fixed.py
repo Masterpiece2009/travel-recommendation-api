@@ -529,11 +529,13 @@ def get_candidate_places(user_preferences, user_id, size=30):
     if user_preferences:
         # Try to get from both possible structures
         preferred_categories = (
-            user_preferences.get("categories", [])               # Try the actual structure in DB
+            user_preferences.get("categories", []) or  # Try the actual structure in DB
+            user_preferences.get("preferred_categories", [])  # Try the old expected structure
         )
         
         preferred_tags = (
-            user_preferences.get("tags", [])               # Try the actual structure in DB
+            user_preferences.get("tags", []) or  # Try the actual structure in DB
+            user_preferences.get("preferred_tags", [])  # Try the old expected structure
         )
     else:
         # If user_preferences is None/empty, use empty lists
@@ -547,8 +549,6 @@ def get_candidate_places(user_preferences, user_id, size=30):
     if not preferred_categories and not preferred_tags:
         logger.warning(f"No user preferences found for user {user_id}, returning popular places")
         return list(places_collection.find().sort([("average_rating", -1)]).limit(size))
-    # Log preferences
-    logger.info(f"User preferences - Categories: {preferred_categories}, Tags: {preferred_tags}")
     
     # --- PART 1: VERY AGGRESSIVE FUZZY MATCHING ---
     all_places = list(places_collection.find())
@@ -606,6 +606,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
                              if any(word in tag for word in tag_words))
             if word_matches > 0:
                 score += 0.3 * min(1.0, word_matches / len(tag_words))
+
         
         # 4. Check description for keywords (bonus match)
         if place_description:
@@ -714,7 +715,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
                 # Full semantic matching with spaCy word vectors
                 for place in all_places:
                     place_id = place["_id"]
-                    
+
                     # Skip if place is already highly ranked in category/tag matches
                     if place in category_tag_places[:int(size * 0.3)]:
                         continue

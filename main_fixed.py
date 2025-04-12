@@ -1683,50 +1683,92 @@ def generate_final_recommendations(user_id, num_recommendations=10):
         for place in fallback_places:
             place["source"] = "error_fallback"
         return fallback_places
-def get_recommendations_with_caching(user_id, force_refresh=False, num_recommendations=10):
+def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recommendations=10, max_total=30):
     """
     Get recommendations for a user with caching.
+    Returns a maximum of max_total places, with num_new_recommendations new places and the rest from history.
     
     Args:
         user_id: User ID
         force_refresh: Whether to force generation of new recommendations
-        num_recommendations: Number of recommendations to return
+        num_new_recommendations: Number of new recommendations to return
+        max_total: Maximum total recommendations to return (including history)
         
     Returns:
-        List of recommendation objects
+        Dict with new recommendations and previously shown recommendations
     """
     try:
+        # Get previously shown places
+        previously_shown = shown_places_collection.find_one({"user_id": user_id})
+        previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
+        last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
+        
+        # Get new recommendations (either from cache or generated)
+        new_recommendations = []
+        
         if force_refresh:
             logger.info(f"Force refresh requested for user {user_id}")
-            return generate_final_recommendations(user_id, num_recommendations)
+            new_recommendations = generate_final_recommendations(user_id, num_new_recommendations)
+        else:
+            # Look for cached recommendations
+            cached_entries = get_user_cached_recommendations(user_id)
             
-        # Look for cached recommendations
-        cached_entries = get_user_cached_recommendations(user_id)
+            if not cached_entries:
+                logger.info(f"No cached recommendations found for user {user_id}")
+                new_recommendations = generate_final_recommendations(user_id, num_new_recommendations)
+            else:
+                # Get the first entry with lowest sequence number
+                cached_entry = cached_entries[0]
+                
+                # Remove the used entry from cache
+                recommendations_cache_collection.delete_one({"_id": cached_entry["_id"]})
+                
+                logger.info(f"Using cached recommendations for user {user_id} (sequence {cached_entry['sequence']})")
+                
+                # If this was the last entry, scheduling will be handled by the endpoint
+                if len(cached_entries) <= 2:
+                    logger.info(f"Only {len(cached_entries)} cached entries left for user {user_id}, scheduling more")
+                
+                new_recommendations = cached_entry["recommendations"][:num_new_recommendations]
         
-        if not cached_entries:
-            logger.info(f"No cached recommendations found for user {user_id}")
-            return generate_final_recommendations(user_id, num_recommendations)
+        # Get previously shown places
+        new_place_ids = [p["_id"] for p in new_recommendations]
+        
+        # Calculate how many previously shown places we can include
+        num_history = max_total - len(new_recommendations)
+        
+        # Get previously shown places, excluding what we're about to show and excluding the last shown
+        previously_shown_places = []
+        if previously_shown_ids and num_history > 0:
+            # Get place IDs excluding the most recently shown (to create variety)
+            shown_ids_to_fetch = [pid for pid in previously_shown_ids if pid not in last_shown_ids and pid not in new_place_ids]
             
-        # Get the first entry with lowest sequence number
-        cached_entry = cached_entries[0]
-        
-        # Remove the used entry from cache
-        recommendations_cache_collection.delete_one({"_id": cached_entry["_id"]})
-        
-        logger.info(f"Using cached recommendations for user {user_id} (sequence {cached_entry['sequence']})")
-        
-        # If this was the last entry, schedule background generation of new cache entries
-        if len(cached_entries) <= 2:
-            logger.info(f"Only {len(cached_entries)} cached entries left for user {user_id}, scheduling more")
+            # Limit to what we can show
+            shown_ids_to_fetch = shown_ids_to_fetch[-num_history:] if shown_ids_to_fetch else []
             
-            # This will be handled by the endpoint using BackgroundTasks
-            pass
-            
-        return cached_entry["recommendations"][:num_recommendations]
+            if shown_ids_to_fetch:
+                previously_shown_places = list(places_collection.find({"_id": {"$in": shown_ids_to_fetch}}))
+                
+                # Add source information
+                for place in previously_shown_places:
+                    place["source"] = "history"
         
+        # Track these new recommendations as shown
+        update_shown_places(user_id, new_place_ids, max_places=100)
+        
+        return {
+            "new_recommendations": new_recommendations,
+            "previously_shown": previously_shown_places
+        }
+            
     except Exception as e:
         logger.error(f"Error getting recommendations with caching: {str(e)}")
-        return generate_final_recommendations(user_id, num_recommendations)
+        # Fallback to generating without cache
+        new_recommendations = generate_final_recommendations(user_id, num_new_recommendations)
+        return {
+            "new_recommendations": new_recommendations,
+            "previously_shown": []
+        }
 
 async def background_cache_recommendations(user_id, num_entries=6):
     """
@@ -1754,9 +1796,34 @@ async def background_cache_recommendations(user_id, num_entries=6):
         
         # Check if lock was acquired
         if lock_result.modified_count == 0 and lock_result.upserted_id is None:
-            # Lock already exists and is held by another process
-            logger.info(f"Cache generation already in progress for user {user_id}, skipping")
-            return
+            # Check if lock is stale (older than 5 minutes)
+            lock = cache_locks_collection.find_one({"_id": cache_lock_key})
+            if lock:
+                lock_time = lock.get("timestamp", datetime.min)
+                if isinstance(lock_time, str):
+                    try:
+                        lock_time = datetime.fromisoformat(lock_time.replace('Z', '+00:00'))
+                    except Exception:
+                        lock_time = datetime.min
+                        
+                if (datetime.now() - lock_time).total_seconds() < 300:  # 5 minutes
+                    logger.info(f"Cache generation already in progress for user {user_id}, skipping")
+                    return
+                
+                # Lock is stale, force delete it
+                cache_locks_collection.delete_one({"_id": cache_lock_key})
+                logger.info(f"Removed stale lock for user {user_id}")
+                
+                # Try to acquire the lock again
+                cache_locks_collection.insert_one({
+                    "_id": cache_lock_key,
+                    "user_id": user_id,
+                    "locked": True,
+                    "timestamp": datetime.now()
+                })
+            else:
+                logger.info(f"Cache generation already in progress for user {user_id}, skipping")
+                return
             
         # Get existing entries to avoid duplicates
         try:
@@ -1774,19 +1841,33 @@ async def background_cache_recommendations(user_id, num_entries=6):
         
         for i in range(num_entries):
             try:
+                # Generate with slightly different weights for variety
+                randomization_seed = next_sequence + i + int(datetime.now().timestamp())
+                random.seed(randomization_seed)
+                
                 # Wait a small amount of time between generations for variety
                 await asyncio.sleep(0.5)
                 
-                # Generate fresh recommendations
+                # Generate fresh recommendations with randomized weights
+                collab_weight = 0.4 + (random.random() * 0.1 - 0.05)  # 35-45%
                 recommendations = generate_final_recommendations(user_id, 10)
                 
                 # Store in cache with incrementing sequence
                 sequence = next_sequence + i
                 
-                # Note the sequence in the stored data
-                store_cache_entry(user_id, recommendations, sequence)
+                # Store with generation parameters for debugging
+                recommendations_cache_collection.insert_one({
+                    "user_id": user_id,
+                    "sequence": sequence,
+                    "recommendations": recommendations,
+                    "timestamp": datetime.now(),
+                    "generation_params": {
+                        "collab_weight": collab_weight,
+                        "randomization_seed": randomization_seed
+                    }
+                })
                 
-                logger.info(f"Generated cache entry {i+1}/{num_entries} for user {user_id}")
+                logger.info(f"Generated cache entry {i+1}/{num_entries} for user {user_id} (sequence {sequence})")
                 
             except Exception as entry_error:
                 logger.error(f"Error generating cache entry {i+1}/{num_entries}: {entry_error}")

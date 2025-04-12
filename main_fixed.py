@@ -1685,14 +1685,16 @@ def generate_final_recommendations(user_id, num_recommendations=10):
         return fallback_places
 def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recommendations=10, max_total=30):
     """
-    Get recommendations for a user with caching.
-    Returns a maximum of max_total places, with num_new_recommendations new places and the rest from history.
+    Get recommendations for a user with caching and progressive pagination.
+    First request: Return 10 new places
+    Second request: Return 10 new places + previous 10 = 20 total
+    Third request and beyond: Return 10 new places + 20 most recent shown places = 30 total
     
     Args:
         user_id: User ID
         force_refresh: Whether to force generation of new recommendations
-        num_new_recommendations: Number of new recommendations to return
-        max_total: Maximum total recommendations to return (including history)
+        num_new_recommendations: Number of new recommendations to return (default 10)
+        max_total: Maximum total recommendations to return (default 30)
         
     Returns:
         Dict with new recommendations and previously shown recommendations
@@ -1701,21 +1703,39 @@ def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recom
         # Get previously shown places
         previously_shown = shown_places_collection.find_one({"user_id": user_id})
         previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
-        last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
+        
+        # Determine how many previously shown places to return based on pagination
+        total_shown_count = len(previously_shown_ids)
+        
+        # Progressive pagination logic:
+        # - First request: Return 10 new places only (0 previous)
+        # - Second request: Return 10 new + 10 previous = 20 total
+        # - Third+ request: Return 10 new + 20 previous = 30 total
+        if total_shown_count == 0:
+            # First request - no previous places
+            history_count = 0
+        elif total_shown_count <= 10:
+            # Second request - include up to 10 previous places
+            history_count = total_shown_count
+        else:
+            # Third+ request - include up to 20 previous places
+            history_count = min(20, total_shown_count)
+        
+        logger.info(f"User {user_id} pagination: {total_shown_count} total shown, returning {history_count} history items")
         
         # Get new recommendations (either from cache or generated)
         new_recommendations = []
         
         if force_refresh:
             logger.info(f"Force refresh requested for user {user_id}")
-            new_recommendations = generate_final_recommendations(user_id, num_new_recommendations)
+            new_recommendations = generate_final_recommendations(user_id, num_new_recommendations, previously_shown_ids)
         else:
             # Look for cached recommendations
             cached_entries = get_user_cached_recommendations(user_id)
             
             if not cached_entries:
                 logger.info(f"No cached recommendations found for user {user_id}")
-                new_recommendations = generate_final_recommendations(user_id, num_new_recommendations)
+                new_recommendations = generate_final_recommendations(user_id, num_new_recommendations, previously_shown_ids)
             else:
                 # Get the first entry with lowest sequence number
                 cached_entry = cached_entries[0]
@@ -1729,22 +1749,28 @@ def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recom
                 if len(cached_entries) <= 2:
                     logger.info(f"Only {len(cached_entries)} cached entries left for user {user_id}, scheduling more")
                 
-                new_recommendations = cached_entry["recommendations"][:num_new_recommendations]
+                # Filter cached recommendations to remove previously shown places if possible
+                filtered_recommendations = [r for r in cached_entry["recommendations"] 
+                                           if r["_id"] not in previously_shown_ids]
+                
+                # If we don't have enough after filtering, use original cached recommendations
+                if len(filtered_recommendations) >= num_new_recommendations:
+                    new_recommendations = filtered_recommendations[:num_new_recommendations]
+                else:
+                    logger.info(f"Not enough new places in cache after filtering, using original cache")
+                    new_recommendations = cached_entry["recommendations"][:num_new_recommendations]
         
-        # Get previously shown places
+        # Get the IDs of new recommendations
         new_place_ids = [p["_id"] for p in new_recommendations]
         
-        # Calculate how many previously shown places we can include
-        num_history = max_total - len(new_recommendations)
-        
-        # Get previously shown places, excluding what we're about to show and excluding the last shown
+        # Get previously shown places for history display
         previously_shown_places = []
-        if previously_shown_ids and num_history > 0:
-            # Get place IDs excluding the most recently shown (to create variety)
-            shown_ids_to_fetch = [pid for pid in previously_shown_ids if pid not in last_shown_ids and pid not in new_place_ids]
+        if history_count > 0:
+            # Get most recent previously shown places, excluding what we're about to show
+            shown_ids_to_fetch = [pid for pid in previously_shown_ids if pid not in new_place_ids]
             
-            # Limit to what we can show
-            shown_ids_to_fetch = shown_ids_to_fetch[-num_history:] if shown_ids_to_fetch else []
+            # Get the most recent ones (at the end of the list)
+            shown_ids_to_fetch = shown_ids_to_fetch[-history_count:] if shown_ids_to_fetch else []
             
             if shown_ids_to_fetch:
                 previously_shown_places = list(places_collection.find({"_id": {"$in": shown_ids_to_fetch}}))
@@ -1764,12 +1790,11 @@ def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recom
     except Exception as e:
         logger.error(f"Error getting recommendations with caching: {str(e)}")
         # Fallback to generating without cache
-        new_recommendations = generate_final_recommendations(user_id, num_new_recommendations)
+        new_recommendations = generate_final_recommendations(user_id, num_new_recommendations, [])
         return {
             "new_recommendations": new_recommendations,
             "previously_shown": []
         }
-
 async def background_cache_recommendations(user_id, num_entries=6):
     """
     Background task to pre-generate multiple recommendation entries for caching.

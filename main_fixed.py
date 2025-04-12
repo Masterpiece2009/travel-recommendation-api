@@ -2432,22 +2432,23 @@ async def get_recommendations(
     background_tasks: BackgroundTasks = None
 ):
     """
-    Get recommendations for a user
+    Get recommendations for a user with progressive pagination.
+    First request: Return 10 new places
+    Second request: Return 10 new places + previous 10 = 20 total
+    Third request and beyond: Return 10 new places + 20 most recent shown places = 30 total
     
     Args:
         user_id: User ID
-        num: Number of recommendations to return
+        num: Number of NEW recommendations to return (default 10)
         force_refresh: Whether to force fresh recommendations
     """
     try:
-        # Get recommendations with the enhanced caching system
-        # We'll use the num parameter for both new recommendations and max_total
-        # This maintains backward compatibility while using the improved function
+        # Get recommendations with the enhanced progressive pagination
         recommendation_data = get_recommendations_with_caching(
             user_id, 
             force_refresh=force_refresh, 
-            num_new_recommendations=int(num * 0.5),  # About half will be new
-            max_total=num  # Total remains the same as requested
+            num_new_recommendations=num,  # Number of new recommendations to fetch
+            max_total=max(30, num * 3)  # Ensure we have enough capacity for history
         )
         
         # Combine new and previously shown recommendations
@@ -2461,11 +2462,13 @@ async def get_recommendations(
                 logger.info(f"Cache count low ({cache_count}), scheduling regeneration")
                 background_tasks.add_task(background_cache_recommendations, user_id, 6)
         
-        # Return recommendations in the original format
+        # Return recommendations
         return {
             "success": True,
             "user_id": user_id,
             "count": len(all_recommendations),
+            "new_count": len(recommendation_data["new_recommendations"]),
+            "history_count": len(recommendation_data["previously_shown"]),
             "recommendations": all_recommendations,
             "cache_used": not force_refresh and len(recommendation_data["new_recommendations"]) > 0
         }

@@ -809,8 +809,20 @@ def get_candidate_places(user_preferences, user_id, size=30):
     logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
     return candidate_places
 
+
+import math
+from datetime import datetime, timedelta
+
 def get_collaborative_recommendations(user_id):
-    """Get places from similar users based on various interactions"""
+    """
+    Get place recommendations based on similar users' interactions.
+    
+    Args:
+        user_id: User ID to get recommendations for
+        
+    Returns:
+        List of place IDs recommended through collaborative filtering
+    """
     try:
         logger.info(f"Finding collaborative recommendations for user {user_id}")
         user = users_collection.find_one({"_id": user_id})
@@ -825,10 +837,12 @@ def get_collaborative_recommendations(user_id):
 
         # Find similar users
         similar_users = list(users_collection.find({
-            "preferences.preferred_categories": {"$in": preferred_categories},
-            "preferences.preferred_tags": {"$in": preferred_tags},
+            "$or": [
+                {"preferences.preferred_categories": {"$in": preferred_categories}},
+                {"preferences.preferred_tags": {"$in": preferred_tags}}
+            ],
             "_id": {"$ne": user_id}
-        }))
+        }).limit(50))  # Limit to 50 similar users for performance
 
         logger.info(f"Found {len(similar_users)} similar users for user {user_id}")
 
@@ -846,7 +860,7 @@ def get_collaborative_recommendations(user_id):
         # Get current time consistently as timezone-naive
         current_date = datetime.now().replace(tzinfo=None).date()
 
-        # Time decay factor for older interactions - IMPROVED DATETIME HANDLING
+        # Time decay factor for older interactions
         def apply_time_decay(weight, interaction_time):
             # Parse the timestamp string if needed
             if isinstance(interaction_time, str):
@@ -883,7 +897,7 @@ def get_collaborative_recommendations(user_id):
 
         # Process interactions from similar users
         for similar_user in similar_users:
-            interactions = list(interactions_collection.find({"user_id": similar_user["_id"]}))
+            interactions = list(interactions_collection.find({"user_id": similar_user["_id"]}).limit(100))
 
             for interaction in interactions:
                 # Skip if place_id or interaction_type is missing
@@ -1232,39 +1246,21 @@ def generate_final_recommendations(user_id, num_recommendations=10):
         # Get user preferences
         user_prefs = get_user_travel_preferences(user_id)
         
-        # PART 1: Get refresh requests - places from previous request the user wants to see again
+        # Get previously shown places
+        previously_shown = shown_places_collection.find_one({"user_id": user_id})
+        previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
+        last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
+        
+        # Initialize recommendations
         recommendations = []
-        refresh_requests = refresh_requests_collection.find_one({"user_id": user_id})
         
-        if refresh_requests and "place_ids" in refresh_requests:
-            refresh_place_ids = refresh_requests.get("place_ids", [])
-            if refresh_place_ids:
-                refresh_places = list(places_collection.find({"_id": {"$in": refresh_place_ids}}))
-                
-                for place in refresh_places:
-                    place["source"] = "refreshed"
-                    recommendations.append(place)
-                
-                logger.info(f"Added {len(refresh_places)} refreshed places")
-                
-                # Clear refresh requests once processed
-                refresh_requests_collection.update_one(
-                    {"user_id": user_id},
-                    {"$set": {"place_ids": []}}
-                )
+        # PART 1: Calculate recommendation distribution (40% collaborative, 60% content-based)
+        collab_count = int(num_recommendations * 0.4)  # 40% for collaborative
+        content_count = num_recommendations - collab_count  # 60% for content-based
         
-        # PART 2: Calculate how many collaborative recommendations to include (40% of total)
-        collab_count = int(num_recommendations * 0.4)
-        content_count = num_recommendations - len(recommendations) - collab_count
-        
-        # Get collaborative recommendations (40%)
+        # PART 2: Get collaborative recommendations first (40%)
         if collab_count > 0:
             collab_places_ids = get_collaborative_recommendations(user_id)
-            
-            # Get previously shown places
-            previously_shown = shown_places_collection.find_one({"user_id": user_id})
-            previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
-            last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
             
             # Filter out previously shown places
             new_collab_place_ids = [pid for pid in collab_places_ids if pid not in previously_shown_ids]
@@ -1283,27 +1279,14 @@ def generate_final_recommendations(user_id, num_recommendations=10):
                 
                 logger.info(f"Added {min(collab_count, len(collab_places))} collaborative filtering recommendations")
             else:
-                # If no new collaborative recommendations, get trending places instead
-                trending_places = get_trending_places(collab_count)
-                filtered_trending = [p for p in trending_places if p["_id"] not in previously_shown_ids]
-                
-                for place in filtered_trending[:collab_count]:
-                    place["source"] = "trending"
-                    recommendations.append(place)
-                
-                logger.info(f"No new collaborative recommendations, added {len(filtered_trending[:collab_count])} trending places instead")
+                logger.info("No new collaborative recommendations available")
         
-        # PART 3: Get content-based recommendations for the remaining slots
+        # PART 3: Get remaining content-based recommendations (60% or more if collaborative failed)
         remaining_content_count = num_recommendations - len(recommendations)
         
         if remaining_content_count > 0:
             # Get candidate places
             candidate_places = get_candidate_places(user_prefs, user_id, size=remaining_content_count * 3)
-            
-            # Get previously shown places
-            previously_shown = shown_places_collection.find_one({"user_id": user_id})
-            previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
-            last_shown_ids = previously_shown.get("last_request_ids", []) if previously_shown else []
             
             # Apply personalization factors
             ranked_places = []

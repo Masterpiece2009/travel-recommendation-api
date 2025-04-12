@@ -63,20 +63,40 @@ except Exception as e:
     logger.error(f"Error creating TTL index on roadmaps collection: {e}")
     
 # --- Initialize spaCy model ---
-def load_spacy_model(model = "en_core_web_md" retries=2):
+def load_spacy_model(model="en_core_web_md", retries=2):
     """Attempts to load the spaCy model, downloading it if necessary."""
     for attempt in range(retries):
         try:
-            return spacy.load(model)
+            nlp = spacy.load(model)
+            logger.info(f"✅ Successfully loaded spaCy model: {model}")
+            
+            # Check if the model has word vectors
+            sample_text = "travel"
+            sample_doc = nlp(sample_text)
+            has_vectors = not all(v == 0 for v in sample_doc.vector)
+            
+            if has_vectors:
+                logger.info(f"✅ Model {model} has word vectors - semantic search will work properly")
+            else:
+                logger.warning(f"⚠️ Model {model} loaded but has NO WORD VECTORS - semantic search will be limited")
+            
+            return nlp
+            
         except Exception as e:
             logger.error(f"❌ Error loading NLP model (Attempt {attempt + 1}/{retries}): {e}")
             try:
+                logger.info(f"📥 Attempting to download spaCy model: {model}")
                 spacy.cli.download(model)
+                logger.info(f"📥 Download attempt completed for model: {model}")
             except Exception as download_err:
-                logger.error(f"Failed to download model: {download_err}")
+                logger.error(f"❌ Failed to download model: {download_err}")
     
     # Return dummy NLP object as fallback
     class DummyNLP:
+        def __init__(self):
+            self.name = "DummyNLP-Fallback"
+            logger.error("🛑 USING DUMMY NLP MODEL - Semantic search will NOT work!")
+            
         def __call__(self, text):
             class DummyDoc:
                 def __init__(self, text):
@@ -84,11 +104,27 @@ def load_spacy_model(model = "en_core_web_md" retries=2):
                     self.vector = [0] * 300  # Empty vector
             return DummyDoc(text)
     
-    logger.warning("Using dummy NLP model as fallback!")
+    logger.warning("⚠️ All attempts to load spaCy model failed! Using DummyNLP fallback model.")
     return DummyNLP()
 
 nlp = load_spacy_model()
-logger.info("✅ NLP Model Loaded!")
+logger.info(f"ℹ️ NLP Model in use: {getattr(nlp, 'name', type(nlp).__name__)}")
+
+# After some time in your application, log whether semantic search is being used
+def log_nlp_status():
+    """Logs the status of NLP model to help with debugging"""
+    if hasattr(nlp, 'name') and nlp.name == "DummyNLP-Fallback":
+        logger.warning("⚠️ Currently using DUMMY NLP model - Semantic search (40% weight) is NOT functional")
+    else:
+        # Test if the model actually has vectors
+        test_doc = nlp("travel destination")
+        if all(v == 0 for v in test_doc.vector):
+            logger.warning("⚠️ spaCy model loaded but NO WORD VECTORS detected - Semantic search may be limited")
+        else:
+            logger.info("✅ NLP model with word vectors is active - Semantic search is functional")
+
+# Call this function at application startup and periodically
+log_nlp_status()
 
 # Initialize FastAPI
 app = FastAPI(

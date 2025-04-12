@@ -533,92 +533,90 @@ def get_candidate_places(user_preferences, user_id, size=30):
     preferred_categories = user_preferences.get("preferred_categories", [])
     preferred_tags = user_preferences.get("preferred_tags", [])
     
-    # --- PART 1: CATEGORY AND TAG MATCHING (60%) ---
-    # Instead of relying solely on MongoDB query, we'll score matches manually
+    # Log preferences
+    logger.info(f"User preferences - Categories: {preferred_categories}, Tags: {preferred_tags}")
+    
+    # --- PART 1: VERY AGGRESSIVE FUZZY MATCHING ---
     all_places = list(places_collection.find())
-    scored_category_tag_places = []
+    scored_places = []
+    
+    # Convert preferences to lowercase for comparison
+    preferred_categories_lower = [cat.lower() for cat in preferred_categories if cat]
+    preferred_tags_lower = [tag.lower() for tag in preferred_tags if tag]
+    
+    # Extract words from categories and tags for partial matching
+    category_words = set()
+    for cat in preferred_categories_lower:
+        category_words.update(cat.split())
+    
+    tag_words = set()
+    for tag in preferred_tags_lower:
+        tag_words.update(tag.split())
     
     for place in all_places:
-        score = 0.0
+        score = 0
+        place_name = place.get("name", "")
         place_category = place.get("category", "").lower() if place.get("category") else ""
         place_tags = [tag.lower() for tag in place.get("tags", [])] if isinstance(place.get("tags"), list) else []
+        place_description = place.get("description", "").lower()
         
-        # 1. Category matching (70% weight) - ENHANCED with fuzzy matching
-        if place_category:
-            # Check for exact match first
-            if preferred_categories and any(cat.lower() == place_category for cat in preferred_categories):
+        # 1. Direct category match (highest weight)
+        if place_category and any(cat == place_category for cat in preferred_categories_lower):
+            score += 1.0
+        
+        # 2. Partial category match
+        elif place_category:
+            # Category contains or is contained by any preferred category
+            if any(cat in place_category or place_category in cat for cat in preferred_categories_lower):
                 score += 0.7
-                logger.debug(f"Exact category match for place {place.get('name')}: {place_category}")
-            else:
-                # Check for partial/substring matches
-                for pref_cat in preferred_categories:
-                    pref_cat_lower = pref_cat.lower()
-                    # Check if categories contain each other
-                    if (pref_cat_lower in place_category or 
-                        place_category in pref_cat_lower or
-                        place_category.split()[0] in pref_cat_lower or  # First word match
-                        pref_cat_lower.split()[0] in place_category):   # First word match
-                        score += 0.5  # Lower score for partial match
-                        logger.debug(f"Partial category match for place {place.get('name')}: {place_category} ≈ {pref_cat}")
-                        break
-                    
-                    # Check for word-level similarity
-                    place_cat_words = set(place_category.split())
-                    pref_cat_words = set(pref_cat_lower.split())
-                    common_words = place_cat_words.intersection(pref_cat_words)
-                    
-                    if common_words:
-                        # Score based on word overlap
-                        overlap_ratio = len(common_words) / len(place_cat_words.union(pref_cat_words))
-                        if overlap_ratio >= 0.3:  # At least 30% word overlap
-                            cat_score = 0.4 * overlap_ratio  # Scale from 0.12 to 0.4
-                            score += cat_score
-                            logger.debug(f"Word overlap in category for place {place.get('name')}: {place_category} ~ {pref_cat}, score: {cat_score:.2f}")
-                            break
+            # Word-level matching
+            elif any(word in place_category for word in category_words):
+                score += 0.5
         
-        # 2. Tag matching (up to 60% weight) - ENHANCED with fuzzy matching
-        # Check for exact tag matches first
-        exact_matching_tags = [tag for tag in place_tags if tag in [t.lower() for t in preferred_tags]]
-        if exact_matching_tags:
-            # Base score of 0.3 for any tag match, plus up to 0.3 more based on % of tags matched
-            tag_ratio = len(exact_matching_tags) / (len(preferred_tags) or 1)  # Avoid division by zero
-            tag_score = min(0.6, 0.3 + (0.3 * tag_ratio))  # Cap at 0.6
-            score += tag_score
-            logger.debug(f"Exact tag matches for place {place.get('name')}: {exact_matching_tags}, score: {tag_score:.2f}")
-        
-        # Check for partial tag matches if no exact matches
-        elif place_tags and preferred_tags:
-            partial_matches = 0
-            for place_tag in place_tags:
-                for pref_tag in preferred_tags:
-                    pref_tag_lower = pref_tag.lower()
-                    
-                    # Check for substring match
-                    if (place_tag in pref_tag_lower or 
-                        pref_tag_lower in place_tag or
-                        # First word match for multi-word tags
-                        (place_tag.split()[0] in pref_tag_lower if ' ' in place_tag else False) or
-                        (pref_tag_lower.split()[0] in place_tag if ' ' in pref_tag_lower else False)):
-                        partial_matches += 1
-                        break
+        # 3. Tag matching - use both exact and partial
+        if place_tags:
+            # Direct tag matches
+            exact_matches = sum(1 for tag in place_tags if tag in preferred_tags_lower)
+            if exact_matches > 0:
+                score += 0.8 * min(1.0, exact_matches / len(preferred_tags_lower))
             
+            # Partial tag matches - check if any place tag contains or is contained by a preferred tag
+            partial_matches = sum(1 for tag in place_tags 
+                                if any(pref in tag or tag in pref 
+                                      for pref in preferred_tags_lower))
             if partial_matches > 0:
-                # Score partial matches with a lower weight
-                partial_ratio = partial_matches / (len(preferred_tags) or 1)
-                partial_tag_score = min(0.4, 0.2 + (0.2 * partial_ratio))  # Cap at 0.4 for partial matches
-                score += partial_tag_score
-                logger.debug(f"Partial tag matches for place {place.get('name')}, score: {partial_tag_score:.2f}")
+                score += 0.5 * min(1.0, partial_matches / len(preferred_tags_lower))
+            
+            # Word-level tag matching
+            word_matches = sum(1 for tag in place_tags 
+                             if any(word in tag for word in tag_words))
+            if word_matches > 0:
+                score += 0.3 * min(1.0, word_matches / len(tag_words))
         
-        # Only consider if there's any match
-        if score > 0:
-            scored_category_tag_places.append((place, score))
+        # 4. Check description for keywords (bonus match)
+        if place_description:
+            cat_matches = sum(1 for cat in preferred_categories_lower if cat in place_description)
+            tag_matches = sum(1 for tag in preferred_tags_lower if tag in place_description)
+            
+            if cat_matches > 0 or tag_matches > 0:
+                score += 0.2  # Small bonus for description matches
+        
+        # 5. EXTRA AGGRESSIVE: Give every place at least a minimal score to ensure some matches
+        if score == 0:
+            score = 0.01
+        
+        scored_places.append((place, score))
     
     # Sort by score descending
-    scored_category_tag_places.sort(key=lambda x: x[1], reverse=True)
-    category_tag_places = [place for place, _ in scored_category_tag_places]
+    scored_places.sort(key=lambda x: x[1], reverse=True)
+    category_tag_places = [place for place, score in scored_places if score > 0.01]  # Filter minimal scores
+    
+    # Limit to ensure we don't have too many low-quality matches
+    category_tag_places = category_tag_places[:min(len(category_tag_places), size)]
     
     logger.info(f"Found {len(category_tag_places)} places with direct category/tag matching for user {user_id}")
     
+    # Continue with the rest of the function (semantic search)...
     # --- PART 2: SEMANTIC SEARCH BASED ON RECENT QUERIES (40%) ---
     semantic_places = []
     

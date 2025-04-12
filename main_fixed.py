@@ -2071,12 +2071,13 @@ def generate_hybrid_roadmap(user_id):
     """
     Generate a travel roadmap for a user using a hybrid two-stage filtering approach.
     First applies critical filters, then soft constraints with weighted scoring.
+    Always returns exactly 10 places, using nearby places and trending places as fallbacks.
     
     Args:
         user_id: User ID
         
     Returns:
-        Dictionary containing roadmap data
+        Dictionary containing roadmap data with exactly 10 places
     """
     logger.info(f"Generating roadmap for user {user_id}")
     
@@ -2226,21 +2227,131 @@ def generate_hybrid_roadmap(user_id):
         
         roadmap["places"].append(place)
     
-    # FALLBACK 2: If no places after all filtering and scoring, add top rated places
-    if len(roadmap["places"]) == 0:
-        logger.warning(f"⚠️ No places in final roadmap for user {user_id}, using top rated places")
-        top_places = list(places_collection.find().sort("average_rating", -1).limit(10))
+    # --- FALLBACK MECHANISMS: Ensure we have exactly 10 places ---
+    
+    # FALLBACK 1: If we don't have 10 places, add nearby places based on location
+    if len(roadmap["places"]) < 10:
+        needed_places = 10 - len(roadmap["places"])
+        logger.info(f"Need {needed_places} more places for roadmap, adding nearby places")
+        
+        nearby_places = []
+        
+        # Get locations of current places
+        current_locations = []
+        for place in roadmap["places"]:
+            loc = place.get("location", {})
+            lat = loc.get("latitude")
+            lng = loc.get("longitude")
+            if lat is not None and lng is not None:
+                current_locations.append((lat, lng, place["_id"]))
+        
+        # If no locations available, skip this step
+        if current_locations:
+            # For each place in our database, check proximity to current places
+            for place in all_places:
+                # Skip if already in roadmap
+                if place["_id"] in [p["_id"] for p in roadmap["places"]]:
+                    continue
+                
+                # Check location proximity
+                loc = place.get("location", {})
+                lat = loc.get("latitude")
+                lng = loc.get("longitude")
+                
+                if lat is not None and lng is not None:
+                    # Find minimum distance to any current place
+                    min_distance = float('inf')
+                    for curr_lat, curr_lng, curr_id in current_locations:
+                        try:
+                            distance = geodesic((lat, lng), (curr_lat, curr_lng)).kilometers
+                            min_distance = min(min_distance, distance)
+                        except Exception:
+                            continue
+                    
+                    # If within reasonable distance (100km), add to nearby places
+                    if min_distance < 100:
+                        nearby_places.append({
+                            "place": place,
+                            "distance": min_distance
+                        })
+            
+            # Sort by distance and add to roadmap
+            nearby_places.sort(key=lambda x: x["distance"])
+            
+            for item in nearby_places[:needed_places]:
+                place = item["place"]
+                place["match_scores"] = {
+                    "total": 0.4,  # Lower score than primary matches
+                    "budget": 0.5,
+                    "accessibility": 0.5,
+                    "group": 0.5,
+                    "seasonal": 0.5,
+                    "source": "nearby"
+                }
+                roadmap["places"].append(place)
+                logger.info(f"Added nearby place: {place.get('name')} ({item['distance']:.1f}km)")
+    
+    # FALLBACK 2: If still not enough, add trending places
+    if len(roadmap["places"]) < 10:
+        needed_places = 10 - len(roadmap["places"])
+        logger.info(f"Need {needed_places} more places for roadmap, adding trending places")
+        
+        # Get recent interactions to find trending places
+        recent_date = datetime.now() - timedelta(days=14)
+        trending_interactions = list(interactions_collection.aggregate([
+            {"$match": {"timestamp": {"$gte": recent_date}}},
+            {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+            {"$limit": needed_places * 2}
+        ]))
+        
+        trending_place_ids = [item["_id"] for item in trending_interactions]
+        
+        # Filter out places already in roadmap
+        trending_place_ids = [pid for pid in trending_place_ids 
+                             if pid not in [p["_id"] for p in roadmap["places"]]]
+        
+        # Get place details
+        if trending_place_ids:
+            trending_places = list(places_collection.find({"_id": {"$in": trending_place_ids}}))
+            
+            for place in trending_places[:needed_places]:
+                place["match_scores"] = {
+                    "total": 0.3,  # Lower score than other matches
+                    "budget": 0.5,
+                    "accessibility": 0.5,
+                    "group": 0.5,
+                    "seasonal": 0.5,
+                    "source": "trending"
+                }
+                roadmap["places"].append(place)
+                logger.info(f"Added trending place: {place.get('name')}")
+    
+    # FALLBACK 3: Final fallback - add any top-rated places
+    if len(roadmap["places"]) < 10:
+        needed_places = 10 - len(roadmap["places"])
+        logger.info(f"Need {needed_places} more places for roadmap, adding top-rated places")
+        
+        # Exclude places already in roadmap
+        current_place_ids = [p["_id"] for p in roadmap["places"]]
+        top_places = list(places_collection.find(
+            {"_id": {"$nin": current_place_ids}}
+        ).sort("average_rating", -1).limit(needed_places))
         
         for place in top_places:
-            # Add default scores
             place["match_scores"] = {
-                "total": 0.5,
+                "total": 0.2,  # Lowest score for fallback
                 "budget": 0.5,
                 "accessibility": 0.5,
                 "group": 0.5,
-                "seasonal": 0.5
+                "seasonal": 0.5,
+                "source": "fallback"
             }
             roadmap["places"].append(place)
+            logger.info(f"Added fallback place: {place.get('name')}")
+    
+    # Ensure we have exactly 10 places (trim if somehow more)
+    roadmap["places"] = roadmap["places"][:10]
     
     # Add routes between places
     if len(roadmap["places"]) >= 2:
@@ -2258,7 +2369,6 @@ def generate_hybrid_roadmap(user_id):
     
     logger.info(f"Generated roadmap with {len(roadmap['places'])} places and {len(roadmap['routes'])} routes")
     return roadmap
-
 def simplify_roadmap_to_list(roadmap_data):
     """
     Simplify the roadmap data to a flat list format for easier consumption.

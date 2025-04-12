@@ -832,14 +832,48 @@ def get_collaborative_recommendations(user_id):
         preferred_categories = user_prefs.get("preferred_categories", [])
         preferred_tags = user_prefs.get("preferred_tags", [])
 
-        # Find similar users
-        similar_users = list(users_collection.find({
-            "$or": [
-                {"preferences.preferred_categories": {"$in": preferred_categories}},
+        # Find similar users using fuzzy matching
+        # Use both exact and pattern matches for greater flexibility
+        similar_users_query = {
+            "_id": {"$ne": user_id},  # Exclude current user
+            "$or": []  # Will add conditions below
+        }
+        
+        # Add category conditions if we have categories
+        if preferred_categories:
+            # Add exact match condition
+            similar_users_query["$or"].append(
+                {"preferences.preferred_categories": {"$in": preferred_categories}}
+            )
+            
+            # Add partial match conditions for each category
+            for category in preferred_categories:
+                if category and len(category) > 3:  # Only use meaningful categories
+                    # Find users with categories that contain this category as a substring
+                    similar_users_query["$or"].append(
+                        {"preferences.preferred_categories": {"$regex": category, "$options": "i"}}
+                    )
+        
+        # Add tag conditions if we have tags
+        if preferred_tags:
+            # Add exact match condition
+            similar_users_query["$or"].append(
                 {"preferences.preferred_tags": {"$in": preferred_tags}}
-            ],
-            "_id": {"$ne": user_id}
-        }).limit(50))  # Limit to 50 similar users for performance
+            )
+            
+            # Add partial match conditions for each tag
+            for tag in preferred_tags:
+                if tag and len(tag) > 3:  # Only use meaningful tags
+                    # Find users with tags that contain this tag as a substring
+                    similar_users_query["$or"].append(
+                        {"preferences.preferred_tags": {"$regex": tag, "$options": "i"}}
+                    )
+        
+        # If we have no query conditions, use a reasonable default
+        if not similar_users_query["$or"]:
+            similar_users = list(users_collection.find({"_id": {"$ne": user_id}}).limit(50))
+        else:
+            similar_users = list(users_collection.find(similar_users_query).limit(100))  # Increased limit for broader matches
 
         logger.info(f"Found {len(similar_users)} similar users for user {user_id}")
 
@@ -883,6 +917,12 @@ def get_collaborative_recommendations(user_id):
             decay = math.exp(-days_ago / 30)  # Exponential decay over 30 days
             return weight * decay
 
+        # Calculate similarity scores for each user
+        user_similarities = {}
+        for similar_user in similar_users:
+            similarity = calculate_similarity_score(user, similar_user)
+            user_similarities[similar_user["_id"]] = similarity
+
         # Track recommended places with scores
         place_scores = {}
 
@@ -895,6 +935,9 @@ def get_collaborative_recommendations(user_id):
         # Process interactions from similar users
         for similar_user in similar_users:
             interactions = list(interactions_collection.find({"user_id": similar_user["_id"]}).limit(100))
+            
+            # Get similarity score for this user
+            similarity = user_similarities.get(similar_user["_id"], 0.5)  # Default 0.5 if missing
 
             for interaction in interactions:
                 # Skip if place_id or interaction_type is missing
@@ -912,13 +955,18 @@ def get_collaborative_recommendations(user_id):
                     continue
 
                 weight = action_weights.get(action, 1)  # Default weight of 1 for unknown actions
-                weighted_score = apply_time_decay(weight, timestamp)
+                
+                # Apply time decay
+                time_decayed_score = apply_time_decay(weight, timestamp)
+                
+                # Apply user similarity as a multiplier
+                final_score = time_decayed_score * similarity
 
                 # Only add positively scored places
-                if weighted_score > 0:
+                if final_score > 0:
                     if place_id not in place_scores:
                         place_scores[place_id] = 0
-                    place_scores[place_id] += weighted_score
+                    place_scores[place_id] += final_score
 
         # Sort places by score
         sorted_places = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)
@@ -930,6 +978,69 @@ def get_collaborative_recommendations(user_id):
         logger.error(f"Error in collaborative filtering: {str(e)}")
         return []
 
+def calculate_similarity_score(user1, user2):
+    """
+    Calculate similarity between two users based on their preferences.
+    Returns a score between 0 and 1.
+    """
+    try:
+        # Get preferences
+        prefs1 = user1.get("preferences", {})
+        prefs2 = user2.get("preferences", {})
+        
+        if not prefs1 or not prefs2:
+            return 0.3  # Default modest similarity when preferences missing
+        
+        similarity_score = 0.0
+        factors_count = 0
+        
+        # 1. Category similarity (weighted 40%)
+        cats1 = set(prefs1.get("preferred_categories", []))
+        cats2 = set(prefs2.get("preferred_categories", []))
+        
+        if cats1 and cats2:
+            # Jaccard similarity for categories
+            category_jaccard = len(cats1.intersection(cats2)) / max(len(cats1.union(cats2)), 1)
+            similarity_score += category_jaccard * 0.4
+            factors_count += 1
+        
+        # 2. Tag similarity (weighted 40%)
+        tags1 = set(prefs1.get("preferred_tags", []))
+        tags2 = set(prefs2.get("preferred_tags", []))
+        
+        if tags1 and tags2:
+            # Jaccard similarity for tags
+            tag_jaccard = len(tags1.intersection(tags2)) / max(len(tags1.union(tags2)), 1)
+            similarity_score += tag_jaccard * 0.4
+            factors_count += 1
+        
+        # 3. Activity level similarity (weighted 20%)
+        # This is a proxy for user engagement patterns
+        activity1 = prefs1.get("activity_level", "medium")
+        activity2 = prefs2.get("activity_level", "medium")
+        
+        activity_score = 0
+        if activity1 == activity2:
+            activity_score = 1.0
+        elif (activity1 in ["high", "medium"] and activity2 in ["high", "medium"]) or \
+             (activity1 in ["medium", "low"] and activity2 in ["medium", "low"]):
+            # Adjacent activity levels
+            activity_score = 0.5
+            
+        similarity_score += activity_score * 0.2
+        factors_count += 1
+        
+        # Normalize if we have factors
+        final_score = similarity_score / factors_count if factors_count > 0 else 0.3
+        
+        # Boost score slightly to encourage more recommendations
+        boosted_score = min(1.0, final_score * 1.2)
+        
+        return boosted_score
+        
+    except Exception as e:
+        logger.error(f"Error calculating user similarity: {str(e)}")
+        return 0.3  # Default modest similarity on error
 def get_discovery_places(user_id, limit=10):
     """Get places outside the user's normal patterns for discovery"""
     try:

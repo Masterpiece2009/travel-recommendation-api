@@ -297,7 +297,7 @@ def get_candidate_places(user_id, size=30):
     preferred_categories = user_prefs.get("preferred_categories", [])
     preferred_tags = user_prefs.get("preferred_tags", [])
     
-    # Combination query matching categories OR tags
+    # --- PART 1: CATEGORY AND TAG MATCHING (60%) ---
     query = {"$or": []}
     
     # Add category filter if we have preferred categories
@@ -312,15 +312,103 @@ def get_candidate_places(user_id, size=30):
     if not query["$or"]:
         return list(places_collection.find().limit(size))
         
-    # Query the database
-    candidate_places = list(places_collection.find(query).limit(size))
+    # Get places matching categories or tags
+    category_tag_places = list(places_collection.find(query).limit(size))
+    
+    # --- PART 2: SEMANTIC SEARCH BASED ON RECENT QUERIES (40%) ---
+    # Only perform semantic search if we have NLP with word vectors
+    semantic_places = []
+    test_doc = nlp("test")
+    has_vectors = not all(v == 0 for v in test_doc.vector)
+    
+    if has_vectors:
+        try:
+            # Fetch recent search queries for this user
+            search_queries = list(search_queries_collection.find(
+                {"user_id": user_id}
+            ).sort("timestamp", -1).limit(5))
+            
+            # Extract keywords from search queries
+            search_keywords = set()
+            for query in search_queries:
+                query_text = query.get("query", "")
+                if query_text:
+                    # Simple keyword extraction
+                    stopwords = {'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'with', 'by'}
+                    keywords = [word.lower() for word in query_text.split() if word.lower() not in stopwords]
+                    for keyword in keywords:
+                        search_keywords.add(keyword)
+            
+            if search_keywords:
+                # Get all places for semantic matching
+                all_places = list(places_collection.find())
+                
+                # Calculate semantic similarity scores
+                keyword_place_scores = {}
+                
+                for keyword in search_keywords:
+                    keyword_doc = nlp(keyword.lower())
+                    
+                    for place in all_places:
+                        place_id = place["_id"]
+                        
+                        if place_id not in keyword_place_scores:
+                            keyword_place_scores[place_id] = 0
+                        
+                        # Check each tag for similarity
+                        if "tags" in place and isinstance(place["tags"], list):
+                            for tag in place["tags"]:
+                                tag_doc = nlp(tag.lower())
+                                similarity = keyword_doc.similarity(tag_doc)
+                                
+                                # Add score if similarity is above threshold
+                                if similarity > 0.6:
+                                    keyword_place_scores[place_id] += similarity
+                
+                # Get top matching places
+                semantic_matches = [(place_id, score) for place_id, score in keyword_place_scores.items() if score > 0]
+                semantic_matches.sort(key=lambda x: x[1], reverse=True)
+                
+                # Get the actual place documents
+                if semantic_matches:
+                    matched_ids = [match[0] for match in semantic_matches]
+                    semantic_places = list(places_collection.find({"_id": {"$in": matched_ids}}))
+                    
+                    # Sort them by score
+                    id_to_place = {place["_id"]: place for place in semantic_places}
+                    semantic_places = [id_to_place[match_id] for match_id, _ in semantic_matches 
+                                      if match_id in id_to_place]
+        except Exception as e:
+            logger.error(f"Error in semantic search: {e}")
+            # If semantic search fails, we'll just use the category/tag results
+    
+    # --- PART 3: COMBINE RESULTS ---
+    # Calculate counts for each source
+    category_tag_count = min(len(category_tag_places), int(size * 0.6))
+    semantic_count = min(len(semantic_places), size - category_tag_count)
+    
+    # Combine places with no duplicates
+    candidate_places = []
+    added_ids = set()
+    
+    # Add category/tag places first (60%)
+    for place in category_tag_places[:category_tag_count]:
+        place_id = place["_id"]
+        if place_id not in added_ids:
+            candidate_places.append(place)
+            added_ids.add(place_id)
+    
+    # Add semantic places (40%)
+    for place in semantic_places[:semantic_count]:
+        place_id = place["_id"]
+        if place_id not in added_ids and len(candidate_places) < size:
+            candidate_places.append(place)
+            added_ids.add(place_id)
     
     # If we don't have enough candidates, add some random places
     if len(candidate_places) < size:
-        # Get places that aren't already in our candidates
-        existing_ids = [p["_id"] for p in candidate_places]
         additional_places = list(
-            places_collection.find({"_id": {"$nin": existing_ids}})
+            places_collection.find({"_id": {"$nin": list(added_ids)}})
             .limit(size - len(candidate_places))
         )
         candidate_places.extend(additional_places)

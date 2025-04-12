@@ -529,12 +529,10 @@ def get_candidate_places(user_preferences, user_id, size=30):
     if user_preferences:
         # Try to get from both possible structures
         preferred_categories = (
-            user_preferences.get("preferred_categories", []) or  # Try the old expected structure
             user_preferences.get("categories", [])               # Try the actual structure in DB
         )
         
         preferred_tags = (
-            user_preferences.get("preferred_tags", []) or  # Try the old expected structure
             user_preferences.get("tags", [])               # Try the actual structure in DB
         )
     else:

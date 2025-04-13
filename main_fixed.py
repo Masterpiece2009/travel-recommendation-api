@@ -17,7 +17,73 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sklearn.preprocessing import MinMaxScaler
 from geopy.distance import geodesic
-# Add near the top of your file after imports
+def detect_language(text):
+    """
+    Detect the language of a text string.
+    
+    Args:
+        text: Text string to analyze
+        
+    Returns:
+        Language code (e.g., 'en', 'ar')
+    """
+    try:
+        from langdetect import detect
+        if not text or len(text.strip()) == 0:
+            return "en"
+        return detect(text)
+    except Exception as e:
+        logger.warning(f"Language detection failed: {e}")
+        return "en"  # Default to English if detection fails
+        
+def translate_to_english(text):
+    """
+    Translate non-English text to English.
+    Only translates if the text is detected as non-English.
+    
+    Args:
+        text: Text to translate
+        
+    Returns:
+        Translated text or original if translation fails
+    """
+    try:
+        if not text or len(text.strip()) == 0:
+            return text
+            
+        # Detect language
+        lang = detect_language(text)
+        
+        # Only translate if not English
+        if lang != 'en':
+            from deep_translator import GoogleTranslator
+            
+            # Check if we have translation in cache
+            cache_key = f"translate_{lang}_{hash(text)}"
+            cache_result = translation_cache.find_one({"key": cache_key})
+            
+            if cache_result:
+                logger.info(f"Using cached translation from {lang}")
+                return cache_result["translated_text"]
+                
+            # Translate using Google translator
+            translated = GoogleTranslator(source=lang, target='en').translate(text)
+            logger.info(f"Translated text from {lang} to English")
+            
+            # Cache the translation result
+            translation_cache.insert_one({
+                "key": cache_key,
+                "original_text": text,
+                "translated_text": translated,
+                "source_lang": lang,
+                "timestamp": datetime.now()
+            })
+            
+            return translated
+        return text
+    except Exception as e:
+        logger.warning(f"Translation failed: {e}")
+        return text  # Return original if translation fails
 
 # Define DummyNLP in global scope for fallback
 class DummyNLP:
@@ -104,7 +170,18 @@ cache_locks_collection = db["cache_locks"]  # New collection for tracking locks
 user_keywords_cache = db["user_keywords_cache"]
 keyword_similarity_cache = db["keyword_similarity_cache"] 
 similar_users_cache = db["similar_users_cache"]
+# Add translation cache collection
+translation_cache = db["translation_cache"]
 
+# Later, add this with your other TTL indexes
+try:
+    translation_cache.create_index(
+        [("timestamp", pymongo.ASCENDING)],
+        expireAfterSeconds=604800  # 7 days
+    )
+    logger.info("✅ Created TTL index on translation_cache collection")
+except Exception as e:
+    logger.error(f"❌ Error creating TTL index on translation_cache collection: {e}")
 # Create TTL indexes for new collections
 user_keywords_cache.create_index("timestamp", expireAfterSeconds=86400)  # 24 hours
 keyword_similarity_cache.create_index("timestamp", expireAfterSeconds=86400)  # 24 hours
@@ -3552,7 +3629,17 @@ async def get_cache_status(user_id: str):
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
+@app.get("/test_translation")
+async def test_translation(text: str = "مرحبا بالعالم"):
+    """Test the translation functionality"""
+    detected = detect_language(text)
+    translated = translate_to_english(text)
+    return {
+        "original": text,
+        "detected_language": detected,
+        "translated": translated,
+        "success": True
+    }
 @app.delete("/cache/{user_id}")
 async def clear_cache(user_id: str):
     """

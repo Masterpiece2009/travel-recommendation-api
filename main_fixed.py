@@ -2515,6 +2515,71 @@ def check_accessibility_compatibility(place, accessibility_needs):
     
     return True
 
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculate the distance between two points using the Haversine formula.
+    
+    Args:
+        lat1: Latitude of point 1
+        lon1: Longitude of point 1
+        lat2: Latitude of point 2
+        lon2: Longitude of point 2
+        
+    Returns:
+        Distance in kilometers
+    """
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    r = 6371  # Radius of earth in kilometers
+    return c * r
+
+def generate_routes(places):
+    """
+    Generate routes between places in a roadmap.
+    
+    Args:
+        places: List of places
+        
+    Returns:
+        List of route objects
+    """
+    routes = []
+    # For MVP, just create sequential routes between places
+    for i in range(len(places) - 1):
+        from_place = places[i]
+        to_place = places[i+1]
+        
+        # Calculate distance between places if lat/long available
+        distance = None
+        from_loc = from_place.get("location", {})
+        to_loc = to_place.get("location", {})
+        
+        if "latitude" in from_loc and "longitude" in from_loc and "latitude" in to_loc and "longitude" in to_loc:
+            try:
+                distance = calculate_distance(
+                    float(from_loc["latitude"]), float(from_loc["longitude"]),
+                    float(to_loc["latitude"]), float(to_loc["longitude"])
+                )
+                # Round to 1 decimal place
+                distance = round(distance, 1)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Error calculating distance: {e}")
+        
+        routes.append({
+            "from": from_place["_id"],
+            "to": to_place["_id"],
+            "distance_km": distance,
+            "from_name": from_place.get("name", "Unknown"),
+            "to_name": to_place.get("name", "Unknown")
+        })
+    
+    return routes
 from collections import Counter
 def generate_hybrid_roadmap(user_id):
     """

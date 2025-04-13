@@ -17,7 +17,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sklearn.preprocessing import MinMaxScaler
 from geopy.distance import geodesic
-
+# Add near the top of your file after imports
+try:
+    import langdetect
+    import deep_translator
+    logger.info("✅ Language detection and translation packages loaded successfully")
+except ImportError as e:
+    logger.error(f"❌ Error loading language packages: {e}")
 # Define DummyNLP in global scope for fallback
 class DummyNLP:
     def __init__(self):

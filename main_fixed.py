@@ -2477,8 +2477,8 @@ def check_accessibility_compatibility(place, accessibility_needs):
     if not accessibility_needs:
         return True  # No requirements, so all places are compatible
     
-    # Get place accessibility features
-    place_features = place.get("accessibility_features", [])
+    # Get place accessibility features - FIXED: changed field name to match data structure
+    place_features = place.get("accessibility", [])
     
     # Check if all required features are present
     for need in accessibility_needs:
@@ -2486,7 +2486,6 @@ def check_accessibility_compatibility(place, accessibility_needs):
             return False
     
     return True
-
 def generate_hybrid_roadmap(user_id):
     """
     Generate a travel roadmap for a user using a hybrid two-stage filtering approach.

@@ -91,6 +91,15 @@ recommendations_cache_collection = db["recommendations_cache"]
 shown_places_collection = db["shown_places"]
 roadmaps_collection = db["roadmaps"]  # For roadmaps
 cache_locks_collection = db["cache_locks"]  # New collection for tracking locks
+# New cache collections for performance optimizations
+user_keywords_cache = db["user_keywords_cache"]
+keyword_similarity_cache = db["keyword_similarity_cache"] 
+similar_users_cache = db["similar_users_cache"]
+
+# Create TTL indexes for new collections
+user_keywords_cache.create_index("timestamp", expireAfterSeconds=86400)  # 24 hours
+keyword_similarity_cache.create_index("timestamp", expireAfterSeconds=86400)  # 24 hours
+similar_users_cache.create_index("timestamp", expireAfterSeconds=43200)  # 12 hours
 
 # --- CREATE TTL INDEXES ---
 # These indexes automatically remove documents after a specified time period

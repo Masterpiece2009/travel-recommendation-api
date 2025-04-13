@@ -18,12 +18,7 @@ from pydantic import BaseModel
 from sklearn.preprocessing import MinMaxScaler
 from geopy.distance import geodesic
 # Add near the top of your file after imports
-try:
-    import langdetect
-    import deep_translator
-    logger.info("✅ Language detection and translation packages loaded successfully")
-except ImportError as e:
-    logger.error(f"❌ Error loading language packages: {e}")
+
 # Define DummyNLP in global scope for fallback
 class DummyNLP:
     def __init__(self):
@@ -60,7 +55,15 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
+# Add this AFTER your logger is defined
+try:
+    import langdetect
+    import deep_translator
+    print("✅ Language detection and translation packages loaded successfully")
+    logger.info("✅ Language detection and translation packages loaded successfully")
+except ImportError as e:
+    print(f"❌ Error loading language packages: {e}")
+    logger.error(f"❌ Error loading language packages: {e}")
 # ✅ Securely Connect to MongoDB
 password = os.environ.get("MONGO_PASSWORD", "master2002_B*")  # Fallback for development
 encoded_password = urllib.parse.quote_plus(password)

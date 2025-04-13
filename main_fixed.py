@@ -1151,7 +1151,7 @@ def get_candidate_places(user_preferences, user_id, size=30):
 import math
 from datetime import datetime, timedelta
 
-def get_collaborative_recommendations(user_id, target_count=10, excluded_place_ids=None):
+def get_collaborative_recommendations(user_id, target_count=39, excluded_place_ids=None):
     """
     Get place recommendations based on similar users' interactions,
     with caching of similar users for improved performance.

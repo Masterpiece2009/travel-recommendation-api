@@ -1155,12 +1155,20 @@ def get_candidate_places(user_preferences, user_id, size=30):
                         for tag in tags:
                             try:
                                 tag_doc = nlp(tag.lower())
-                                similarity = keyword_doc.similarity(tag_doc)
-                                
-                                # Count significant matches
-                                if similarity > 0.6:  # Threshold for semantic match
-                                    tag_similarity += similarity
-                                    tag_match_count += 1
+                                # FIXED: Check if both docs have valid vectors before comparing
+                                if (hasattr(keyword_doc, 'vector_norm') and keyword_doc.vector_norm > 0 and 
+                                    hasattr(tag_doc, 'vector_norm') and tag_doc.vector_norm > 0):
+                                    similarity = keyword_doc.similarity(tag_doc)
+                                    
+                                    # Count significant matches
+                                    if similarity > 0.6:  # Threshold for semantic match
+                                        tag_similarity += similarity
+                                        tag_match_count += 1
+                                else:
+                                    # Fallback to exact/partial matching
+                                    if keyword.lower() in tag.lower() or tag.lower() in keyword.lower():
+                                        tag_similarity += 0.7
+                                        tag_match_count += 1
                             except Exception as e:
                                 continue  # Skip this tag if error
                         
@@ -1170,16 +1178,23 @@ def get_candidate_places(user_preferences, user_id, size=30):
                                 # Process full description
                                 desc_doc = nlp(description.lower())
                                 
-                                # Check semantic similarity
-                                similarity = keyword_doc.similarity(desc_doc)
-                                
-                                # Check exact keyword match in description (bonus)
-                                if keyword.lower() in description.lower():
-                                    description_similarity += max(similarity, 0.7)  # At least 0.7 for exact match
-                                    description_match_count += 1
-                                elif similarity > 0.5:  # Lower threshold for description
-                                    description_similarity += similarity
-                                    description_match_count += 1
+                                # FIXED: Check if both docs have valid vectors before comparing
+                                if (hasattr(keyword_doc, 'vector_norm') and keyword_doc.vector_norm > 0 and 
+                                    hasattr(desc_doc, 'vector_norm') and desc_doc.vector_norm > 0):
+                                    similarity = keyword_doc.similarity(desc_doc)
+                                    
+                                    # Check exact keyword match in description (bonus)
+                                    if keyword.lower() in description.lower():
+                                        description_similarity += max(similarity, 0.7)  # At least 0.7 for exact match
+                                        description_match_count += 1
+                                    elif similarity > 0.5:  # Lower threshold for description
+                                        description_similarity += similarity
+                                        description_match_count += 1
+                                else:
+                                    # Fallback to exact matching
+                                    if keyword.lower() in description.lower():
+                                        description_similarity += 0.7
+                                        description_match_count += 1
                             except Exception as e:
                                 logger.debug(f"Error comparing description: {str(e)}")
 
@@ -1286,8 +1301,6 @@ def get_candidate_places(user_preferences, user_id, size=30):
     
     logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
     return candidate_places
-
-
 
 
 import math

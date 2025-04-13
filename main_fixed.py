@@ -338,6 +338,266 @@ def compute_text_similarity(text1, text2):
         
         # Emergency fallback
         return 0
+def find_similar_terms(word, limit=3):
+    """
+    Find terms similar to the given word using word vectors.
+    
+    Args:
+        word: Word to find similar terms for
+        limit: Maximum number of similar terms to return
+        
+    Returns:
+        List of similar terms
+    """
+    try:
+        # Check if NLP is available and has vectors
+        if not nlp or not hasattr(nlp, 'vocab') or not nlp.vocab.vectors.size:
+            return []
+        
+        # Process the word with spaCy
+        word_processed = nlp(word)
+        
+        if not word_processed or not word_processed[0].has_vector:
+            return []
+        
+        # Get the word vector
+        word_vector = word_processed[0].vector
+        
+        # Find similar terms from our places data
+        similar_terms = []
+        
+        # Get a list of common terms from places
+        common_terms = []
+        
+        # Sample up to 100 places for performance
+        sample_places = list(places_collection.find().limit(100))
+        
+        # Extract terms from places
+        for place in sample_places:
+            # Extract words from name, categories, tags
+            terms = place.get("name", "").split() + place.get("categories", []) + place.get("tags", [])
+            common_terms.extend([term.lower() for term in terms if len(term) > 3])
+        
+        # Count occurrences to find most common terms
+        term_counts = Counter(common_terms)
+        common_terms = [term for term, count in term_counts.most_common(100)]
+        
+        # Calculate similarity for each term
+        term_similarities = []
+        
+        for term in common_terms:
+            term_doc = nlp(term)
+            if term_doc and term_doc[0].has_vector:
+                similarity = term_doc[0].similarity(word_processed[0])
+                if similarity > 0.4 and term != word:  # Only include sufficiently similar terms
+                    term_similarities.append((term, similarity))
+        
+        # Sort by similarity and take top results
+        term_similarities.sort(key=lambda x: x[1], reverse=True)
+        similar_terms = [term for term, _ in term_similarities[:limit]]
+        
+        return similar_terms
+        
+    except Exception as e:
+        logger.error(f"Error finding similar terms for '{word}': {e}")
+        return []
+
+def find_places_by_keyword_similarity(keywords, excluded_place_ids=None, limit=20, fallback_level=0):
+    """
+    Find places similar to the given keywords using NLP, with similarity caching.
+    
+    Args:
+        keywords: List of keywords to match
+        excluded_place_ids: List of place IDs to exclude
+        limit: Maximum number of places to return
+        fallback_level: Fallback level (0=full NLP, 1=basic NLP, 2=text search, 3=random)
+        
+    Returns:
+        List of places matching the keywords
+    """
+    if not keywords:
+        return []
+        
+    excluded_place_ids = excluded_place_ids or []
+    cache_key = "_".join(sorted(keywords))
+    
+    try:
+        # Check if we have a cached result for these keywords
+        cached_result = keyword_similarity_cache.find_one({"cache_key": cache_key})
+        
+        if cached_result and "place_ids" in cached_result:
+            # Get the places from the database
+            place_ids = cached_result["place_ids"]
+            
+            # Filter out excluded places
+            filtered_place_ids = [pid for pid in place_ids if pid not in excluded_place_ids]
+            
+            # If we have enough places after filtering, use the cache
+            if len(filtered_place_ids) >= min(5, limit):
+                logger.info(f"Using cached keyword similarity results for {cache_key}")
+                
+                # Get the actual place documents
+                places = list(places_collection.find({"_id": {"$in": filtered_place_ids}}))
+                
+                # Sort by original order (preserves similarity ranking)
+                order_map = {pid: idx for idx, pid in enumerate(filtered_place_ids)}
+                places.sort(key=lambda p: order_map.get(p["_id"], 999))
+                
+                return places[:limit]
+        
+        # No cache or not enough places after filtering, do the full search
+        start_time = time.time()
+        results = []
+        
+        # Try different approaches based on fallback level
+        if fallback_level == 0 and nlp and hasattr(nlp, 'vocab') and nlp.vocab.vectors.size:
+            # Full NLP with word vectors (most advanced)
+            logger.info(f"Using full spaCy NLP with word vectors")
+            
+            # Get all places
+            all_places = list(places_collection.find({"_id": {"$nin": excluded_place_ids}}))
+            
+            # Calculate similarity scores for all places
+            place_scores = []
+            
+            for place in all_places:
+                score = 0
+                place_text = f"{place.get('name', '')} {place.get('description', '')} {' '.join(place.get('categories', []))} {' '.join(place.get('tags', []))}"
+                
+                # Calculate similarity for each keyword
+                for keyword in keywords:
+                    keyword_score = compute_text_similarity(keyword, place_text)
+                    score += keyword_score
+                
+                place_scores.append((place, score / len(keywords)))
+            
+            # Sort by score (descending) and take top results
+            place_scores.sort(key=lambda x: x[1], reverse=True)
+            results = [place for place, score in place_scores[:limit]]
+            
+            # Cache the result (only place IDs to save space)
+            place_ids = [place["_id"] for place in results]
+            
+            keyword_similarity_cache.update_one(
+                {"cache_key": cache_key},
+                {"$set": {
+                    "cache_key": cache_key,
+                    "keywords": keywords,
+                    "place_ids": place_ids,
+                    "fallback_level": fallback_level,
+                    "timestamp": datetime.now()
+                }},
+                upsert=True
+            )
+            
+        elif fallback_level <= 1 and nlp:
+            # Basic NLP without vectors
+            logger.info(f"Using basic spaCy NLP (fallback level: 1)")
+            # Use your existing implementation for this fallback level
+            
+        elif fallback_level <= 2:
+            # Text search fallback
+            logger.info(f"Using text search (fallback level: 2)")
+            # Use your existing implementation for this fallback level
+            
+        else:
+            # Random fallback
+            logger.info(f"Using random selection (fallback level: 3)")
+            # Use your existing implementation for this fallback level
+            
+        logger.info(f"Found {len(results)} places via search keywords (fallback level: {fallback_level})")
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in find_places_by_keyword_similarity: {e}")
+        # Return empty list on error
+        return []
+
+def extract_search_keywords(user_id, user_preferences=None, max_keywords=5):
+    """
+    Extract search keywords for a user based on their preferences, with caching.
+    
+    Args:
+        user_id: User ID to extract keywords for
+        user_preferences: Optional user preferences dict
+        max_keywords: Maximum number of keywords to extract
+        
+    Returns:
+        List of extracted keywords for this user
+    """
+    try:
+        # Check cache first
+        cached_keywords = user_keywords_cache.find_one({"user_id": user_id})
+        
+        if cached_keywords and "keywords" in cached_keywords:
+            logger.info(f"Using cached keywords for user {user_id}")
+            return cached_keywords["keywords"]
+        
+        # If no cache, extract keywords
+        if not user_preferences:
+            user_doc = users_collection.find_one({"_id": user_id})
+            if not user_doc:
+                logger.warning(f"User {user_id} not found when extracting keywords")
+                return []
+            user_preferences = user_doc
+            
+        # Get categories and tags from user preferences
+        categories = user_preferences.get("categories", [])
+        tags = user_preferences.get("tags", [])
+        
+        # Get all relevant words from categories and tags
+        all_words = []
+        
+        # Add categories with multiplier for importance
+        for category in categories:
+            all_words.extend([category] * 3)  # Higher weight for categories
+            
+        # Add tags
+        all_words.extend(tags)
+        
+        # Extract additional relevant terms using NLP
+        if nlp:
+            # Create a text representation of preferences
+            preference_text = " ".join(all_words)
+            
+            # Process the text with spaCy
+            doc = nlp(preference_text)
+            
+            # Extract additional keywords from similar terms in our vocabulary
+            # based on vector similarity
+            additional_keywords = []
+            
+            for token in doc:
+                if token.has_vector and not token.is_stop and token.is_alpha:
+                    similar_terms = find_similar_terms(token.text, 3)
+                    additional_keywords.extend(similar_terms)
+            
+            # Add these to all_words
+            all_words.extend(additional_keywords)
+        
+        # Count occurrences to find most common
+        keyword_counts = Counter(all_words)
+        
+        # Get the most common keywords
+        keywords = [kw for kw, _ in keyword_counts.most_common(max_keywords)]
+        
+        # Cache the result
+        user_keywords_cache.update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "user_id": user_id,
+                "keywords": keywords,
+                "timestamp": datetime.now()
+            }},
+            upsert=True
+        )
+        
+        return keywords
+        
+    except Exception as e:
+        logger.error(f"Error extracting search keywords for user {user_id}: {e}")
+        return []
+
 
 def parse_travel_dates(travel_dates_str):
     """

@@ -3740,10 +3740,23 @@ async def search_places(
         limit: Maximum number of results to return
     """
     try:
-        # Track search query
+        # Store original query
+        original_query = query
+        
+        # Detect language and translate if needed
+        detected_language = detect_language(query)
+        if detected_language != 'en':
+            # Translate query to English for better matching
+            translated_query = translate_to_english(query)
+            logger.info(f"Translated search query from '{original_query}' ({detected_language}) to '{translated_query}'")
+            query = translated_query
+        
+        # Track search query with translation info
         search_queries_collection.insert_one({
             "user_id": user_id,
-            "query": query,
+            "query": original_query,
+            "translated_query": query if detected_language != 'en' else None,
+            "detected_language": detected_language,
             "timestamp": datetime.now()
         })
         
@@ -3867,10 +3880,13 @@ async def search_places(
         # Extract just the place data
         final_results = [item["place"] for item in sorted_results]
         
+        # Include translation info in response
         return {
             "success": True,
             "user_id": user_id,
-            "query": query,
+            "query": original_query,
+            "translated_query": query if detected_language != 'en' else None,
+            "detected_language": detected_language,
             "count": len(final_results),
             "results": final_results
         }
@@ -3881,7 +3897,6 @@ async def search_places(
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
 @app.get("/search-history/{user_id}")
 async def get_search_history(
     user_id: str,

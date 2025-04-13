@@ -1348,7 +1348,6 @@ def calculate_similarity_score(user1, user2):
     except Exception as e:
         logger.error(f"Error calculating user similarity: {str(e)}")
         return 0.3  # Default modest similarity on error
-
 def find_similar_users(user_id, min_similarity=0.25, max_users=40):
     """
     Find users similar to the given user based on preferences and interactions,
@@ -1370,16 +1369,16 @@ def find_similar_users(user_id, min_similarity=0.25, max_users=40):
             logger.info(f"Using cached similar users for {user_id}")
             return cached_similar["similar_users"]
         
-# Get user document
-user_doc = users_collection.find_one({"_id": user_id})
-if not user_doc:
-    logger.warning(f"User {user_id} not found when finding similar users")
-    return []
-    
-# Get user preferences from the correct location
-user_prefs = user_doc.get("preferences", {})
-user_categories = set(user_prefs.get("categories", []))
-user_tags = set(user_prefs.get("tags", []))
+        # Get user document
+        user_doc = users_collection.find_one({"_id": user_id})
+        if not user_doc:
+            logger.warning(f"User {user_id} not found when finding similar users")
+            return []
+            
+        # Get user preferences from the correct location
+        user_prefs = user_doc.get("preferences", {})
+        user_categories = set(user_prefs.get("categories", []))
+        user_tags = set(user_prefs.get("tags", []))
         
         # Get all other users
         all_users = list(users_collection.find({"_id": {"$ne": user_id}}))
@@ -1391,6 +1390,9 @@ user_tags = set(user_prefs.get("tags", []))
             
             # Calculate base similarity score between users
             similarity_score = calculate_similarity_score(user_doc, other_user)
+            
+            # Add debug logging
+            logger.info(f"Similarity between {user_id} and {other_id}: {similarity_score}")
             
             # Only include users above minimum similarity
             if similarity_score >= min_similarity:

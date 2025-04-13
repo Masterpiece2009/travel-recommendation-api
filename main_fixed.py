@@ -1864,72 +1864,75 @@ def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recom
         }
 async def background_cache_recommendations(user_id, num_entries=6):
     """
-    Background task to pre-generate multiple recommendation entries for caching.
-    Generates num_entries separate entries, each with a different set of recommendations.
+    Generate and cache recommendation entries for a user in the background.
     
     Args:
-        user_id: User ID to generate recommendations for
+        user_id: User ID
         num_entries: Number of cache entries to generate
     """
-    # Check if generation is already in progress
+    # Create a unique lock key for this user
     cache_lock_key = f"cache_lock_{user_id}"
     
     try:
-        # Try to acquire the lock
-        lock_result = cache_locks_collection.update_one(
-            {"_id": cache_lock_key, "user_id": user_id, "locked": {"$ne": True}},
-            {"$set": {
-                "user_id": user_id,
-                "locked": True,
-                "timestamp": datetime.now()
-            }},
-            upsert=True
-        )
+        # Check if cache generation is already in progress
+        lock = cache_locks_collection.find_one({"_id": cache_lock_key})
         
-        # Check if lock was acquired
-        if lock_result.modified_count == 0 and lock_result.upserted_id is None:
-            # Check if lock is stale (older than 5 minutes)
-            lock = cache_locks_collection.find_one({"_id": cache_lock_key})
-            if lock:
-                lock_time = lock.get("timestamp", datetime.min)
-                if isinstance(lock_time, str):
-                    try:
-                        lock_time = datetime.fromisoformat(lock_time.replace('Z', '+00:00'))
-                    except Exception:
-                        lock_time = datetime.min
-                        
-                if (datetime.now() - lock_time).total_seconds() < 300:  # 5 minutes
-                    logger.info(f"Cache generation already in progress for user {user_id}, skipping")
-                    return
-                
-                # Lock is stale, force delete it
-                cache_locks_collection.delete_one({"_id": cache_lock_key})
-                logger.info(f"Removed stale lock for user {user_id}")
-                
-                # Try to acquire the lock again
-                cache_locks_collection.insert_one({
-                    "_id": cache_lock_key,
-                    "user_id": user_id,
-                    "locked": True,
-                    "timestamp": datetime.now()
-                })
-            else:
-                logger.info(f"Cache generation already in progress for user {user_id}, skipping")
+        if lock:
+            # Check if lock is stale (older than 10 minutes)
+            lock_time = lock.get("timestamp", datetime.min)
+            if isinstance(lock_time, str):
+                try:
+                    lock_time = datetime.fromisoformat(lock_time.replace('Z', '+00:00'))
+                except:
+                    lock_time = datetime.min
+            
+            if (datetime.now() - lock_time).total_seconds() < 600:  # 10 minutes
+                logger.info(f"Cache generation already in progress for user {user_id}")
                 return
-            
-        # Get existing entries to avoid duplicates
+            else:
+                logger.info(f"Found stale lock for user {user_id}, removing")
+                cache_locks_collection.delete_one({"_id": cache_lock_key})
+        
+        # Create lock
+        cache_locks_collection.insert_one({
+            "_id": cache_lock_key,
+            "timestamp": datetime.now(),
+            "user_id": user_id
+        })
+        
+        # Get previously shown places to exclude from cache generation
+        previously_shown = shown_places_collection.find_one({"user_id": user_id})
+        previously_shown_ids = previously_shown.get("place_ids", []) if previously_shown else []
+        
+        # Determine next sequence number
         try:
-            existing_entries = get_user_cached_recommendations(user_id)
-            existing_sequences = {entry["sequence"] for entry in existing_entries}
+            existing_cache = list(recommendations_cache_collection.find(
+                {"user_id": user_id}
+            ).sort("sequence", 1))
             
-            max_sequence = max(existing_sequences) if existing_sequences else 0
-            next_sequence = max_sequence + 1
+            if existing_cache:
+                next_sequence = max([entry.get("sequence", 0) for entry in existing_cache]) + 1
+            else:
+                next_sequence = 0
+                
         except Exception as e:
             logger.error(f"Error getting existing cache entries: {e}")
             next_sequence = 0
             
         # Generate recommendations in sequence
         logger.info(f"Generating {num_entries} cache entries for user {user_id}")
+        
+        # Generate a large pool of recommendations that haven't been shown to the user
+        # This ensures we have enough variety for multiple cache entries
+        large_pool_size = num_entries * 20  # Generate enough for variety
+        large_recommendation_pool = generate_final_recommendations(
+            user_id, 
+            large_pool_size, 
+            previously_shown_ids
+        )
+        
+        # Shuffle the large pool to ensure randomness
+        random.shuffle(large_recommendation_pool)
         
         for i in range(num_entries):
             try:
@@ -1940,9 +1943,29 @@ async def background_cache_recommendations(user_id, num_entries=6):
                 # Wait a small amount of time between generations for variety
                 await asyncio.sleep(0.5)
                 
-                # Generate fresh recommendations with randomized weights
-                collab_weight = 0.4 + (random.random() * 0.1 - 0.05)  # 35-45%
-                recommendations = generate_final_recommendations(user_id, 10)
+                # Take a subset of the large pool for this cache entry
+                start_idx = (i * 15) % len(large_recommendation_pool)
+                
+                # If we don't have enough recommendations left, add some randomness
+                if start_idx + 10 > len(large_recommendation_pool):
+                    recommendations = large_recommendation_pool[:10]
+                    random.shuffle(recommendations)
+                else:
+                    # Take 10 recommendations starting from our position in the pool
+                    recommendations = large_recommendation_pool[start_idx:start_idx + 10]
+                
+                # Ensure we have exactly 10 recommendations
+                if len(recommendations) < 10:
+                    # Generate fallback recommendations if needed
+                    fallback_count = 10 - len(recommendations)
+                    existing_rec_ids = [r["_id"] for r in recommendations]
+                    
+                    # Generate new recommendations excluding both previously shown and those already in our cache
+                    exclude_ids = previously_shown_ids + existing_rec_ids
+                    fallbacks = generate_final_recommendations(user_id, fallback_count, exclude_ids)
+                    
+                    # Add fallbacks to recommendations
+                    recommendations.extend(fallbacks)
                 
                 # Store in cache with incrementing sequence
                 sequence = next_sequence + i
@@ -1954,8 +1977,9 @@ async def background_cache_recommendations(user_id, num_entries=6):
                     "recommendations": recommendations,
                     "timestamp": datetime.now(),
                     "generation_params": {
-                        "collab_weight": collab_weight,
-                        "randomization_seed": randomization_seed
+                        "randomization_seed": randomization_seed,
+                        "excluded_shown_count": len(previously_shown_ids),
+                        "from_large_pool": True
                     }
                 })
                 

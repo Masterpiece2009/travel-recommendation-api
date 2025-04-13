@@ -1382,6 +1382,78 @@ def calculate_similarity_score(user1, user2):
     except Exception as e:
         logger.error(f"Error calculating user similarity: {str(e)}")
         return 0.3  # Default modest similarity on error
+
+def find_similar_users(user_id, min_similarity=0.4, max_users=40):
+    """
+    Find users similar to the given user based on preferences and interactions,
+    with caching for improved performance.
+    
+    Args:
+        user_id: ID of the user to find similar users for
+        min_similarity: Minimum similarity score to include a user
+        max_users: Maximum number of similar users to return
+        
+    Returns:
+        List of similar user IDs with similarity scores
+    """
+    try:
+        # Check if we have cached similar users
+        cached_similar = similar_users_cache.find_one({"user_id": user_id})
+        
+        if cached_similar and "similar_users" in cached_similar:
+            logger.info(f"Using cached similar users for {user_id}")
+            return cached_similar["similar_users"]
+        
+        # Get user document
+        user_doc = users_collection.find_one({"_id": user_id})
+        if not user_doc:
+            logger.warning(f"User {user_id} not found when finding similar users")
+            return []
+            
+        # Get user preferences
+        user_categories = set(user_doc.get("categories", []))
+        user_tags = set(user_doc.get("tags", []))
+        user_destinations = set(user_doc.get("destinations", []))
+        user_activity_level = user_doc.get("activity_level", 3)
+        
+        # Get all other users
+        all_users = list(users_collection.find({"_id": {"$ne": user_id}}))
+        
+        similar_users = []
+        
+        for other_user in all_users:
+            other_id = other_user["_id"]
+            
+            # Calculate base similarity score between users
+            similarity_score = calculate_similarity_score(user_doc, other_user)
+            
+            # Only include users above minimum similarity
+            if similarity_score >= min_similarity:
+                similar_users.append({
+                    "user_id": other_id,
+                    "similarity": similarity_score
+                })
+        
+        # Sort by similarity (descending) and take top users
+        similar_users.sort(key=lambda x: x["similarity"], reverse=True)
+        similar_users = similar_users[:max_users]
+        
+        # Cache the result
+        similar_users_cache.update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "user_id": user_id,
+                "similar_users": similar_users,
+                "timestamp": datetime.now()
+            }},
+            upsert=True
+        )
+        
+        return similar_users
+        
+    except Exception as e:
+        logger.error(f"Error finding similar users for {user_id}: {e}")
+        return []
 def get_discovery_places(user_id, limit=10):
     """Get places outside the user's normal patterns for discovery"""
     try:

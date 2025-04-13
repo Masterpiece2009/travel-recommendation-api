@@ -383,6 +383,7 @@ def compute_text_similarity(text1, text2):
     """
     Compute similarity between two text strings.
     Uses spaCy word vectors if available, falls back to word overlap otherwise.
+    Handles non-English text by translating to English first.
     
     Args:
         text1: First text string
@@ -395,6 +396,21 @@ def compute_text_similarity(text1, text2):
         return 0
         
     try:
+        # Check if either text needs translation
+        text1_lang = detect_language(text1)
+        text2_lang = detect_language(text2)
+        
+        # Translate if needed
+        if text1_lang != 'en':
+            original_text1 = text1
+            text1 = translate_to_english(text1)
+            logger.debug(f"Translated '{original_text1}' ({text1_lang}) to '{text1}'")
+            
+        if text2_lang != 'en':
+            original_text2 = text2
+            text2 = translate_to_english(text2)
+            logger.debug(f"Translated '{original_text2}' ({text2_lang}) to '{text2}'")
+        
         # Try using spaCy word vectors
         doc1 = nlp(text1.lower())
         doc2 = nlp(text2.lower())
@@ -402,7 +418,7 @@ def compute_text_similarity(text1, text2):
         # Check if vectors are available (not all models have vectors)
         if hasattr(doc1, 'vector_norm') and doc1.vector_norm > 0 and hasattr(doc2, 'vector_norm') and doc2.vector_norm > 0:
             similarity = doc1.similarity(doc2)
-            logger.debug(f"Vector similarity between '{text1}' and '{text2}': {similarity:.2f}")
+            logger.debug(f"Vector similarity between texts: {similarity:.2f}")
             return similarity
         
         # Fall back to basic word overlap if vectors aren't available
@@ -416,7 +432,7 @@ def compute_text_similarity(text1, text2):
         union = words1.union(words2)
         
         jaccard_similarity = len(intersection) / len(union) if union else 0
-        logger.debug(f"Jaccard similarity between '{text1}' and '{text2}': {jaccard_similarity:.2f}")
+        logger.debug(f"Jaccard similarity between texts: {jaccard_similarity:.2f}")
         return jaccard_similarity
         
     except Exception as e:

@@ -443,6 +443,7 @@ def compute_text_similarity(text1, text2):
 def find_similar_terms(word, limit=3):
     """
     Find terms similar to the given word using word vectors.
+    Supports non-English words by translating to English first.
     
     Args:
         word: Word to find similar terms for
@@ -452,6 +453,14 @@ def find_similar_terms(word, limit=3):
         List of similar terms
     """
     try:
+        # Detect language and translate if needed
+        original_word = word
+        detected_language = detect_language(word)
+        
+        if detected_language != 'en':
+            word = translate_to_english(word)
+            logger.debug(f"Translated '{original_word}' ({detected_language}) to '{word}'")
+            
         # Check if NLP is available and has vectors
         if not nlp or not hasattr(nlp, 'vocab') or not nlp.vocab.vectors.size:
             return []

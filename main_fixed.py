@@ -2489,7 +2489,7 @@ def check_accessibility_compatibility(place, accessibility_needs):
 def generate_hybrid_roadmap(user_id):
     """
     Generate a travel roadmap for a user using a hybrid approach with mixed recommendation strategies.
-    Prioritizes places in the user's chosen destinations across all recommendation categories.
+    Prioritizes saved places and places in the user's chosen destinations across all recommendation categories.
     Only looks outside destinations if there aren't enough matches.
     Always returns exactly 10 places using a psychologically-optimized balance.
     
@@ -2590,11 +2590,65 @@ def generate_hybrid_roadmap(user_id):
         # If no destinations specified, all filtered places are potential candidates
         destination_places = filtered_places
     
-    # --- MIXED RECOMMENDATION APPROACH ---
+    # --- NEW SECTION: PRIORITIZE SAVED PLACES ---
     # Track already selected places
     selected_place_ids = set()
     mixed_recommendations = []
     
+    # Check if user has saved places
+    saved_place_ids = user.get("saved_places", [])
+    if saved_place_ids:
+        logger.info(f"User {user_id} has {len(saved_place_ids)} saved places")
+        
+        # Get saved places that match our filters
+        saved_places_in_destinations = []
+        
+        # If destinations specified, prioritize saved places in those destinations
+        if destinations and len(destinations) > 0:
+            for place_id in saved_place_ids:
+                # Skip if already selected
+                if place_id in selected_place_ids:
+                    continue
+                    
+                # Find the place
+                place = places_collection.find_one({"_id": place_id})
+                if not place:
+                    continue
+                
+                # Check if it's in the destination places
+                if any(p["_id"] == place_id for p in destination_places):
+                    saved_places_in_destinations.append(place)
+        else:
+            # No specific destinations, just check accessibility
+            for place_id in saved_place_ids:
+                # Skip if already selected
+                if place_id in selected_place_ids:
+                    continue
+                    
+                # Find the place
+                place = places_collection.find_one({"_id": place_id})
+                if not place:
+                    continue
+                
+                # Check if it passed the accessibility filter
+                if any(p["_id"] == place_id for p in filtered_places):
+                    saved_places_in_destinations.append(place)
+        
+        # Add saved places to recommendations with high priority
+        for place in saved_places_in_destinations:
+            mixed_recommendations.append({
+                "place": place,
+                "score": 0.95,  # Very high score for saved places
+                "budget_score": 0.8,
+                "accessibility_score": 0.8,
+                "group_score": 0.8,
+                "seasonal_score": 0.8,
+                "source": "saved_place"  # New source type for saved places
+            })
+            selected_place_ids.add(place["_id"])
+            logger.info(f"Added saved place: {place.get('name')}")
+    
+    # --- MIXED RECOMMENDATION APPROACH ---
     # Define mix ratios based on whether destinations are specified
     if destinations and len(destinations) > 0:
         # If destinations specified, all categories focus on those destinations
@@ -2613,372 +2667,385 @@ def generate_hybrid_roadmap(user_id):
             "top_rated": 0.1          # 10% - Top-rated places
         }
     
-    # Calculate how many places to get from each category (minimum 10 total)
-    category_counts = {}
-    remaining = 10
-    for category, ratio in mix_ratios.items():
-        count = max(1, int(10 * ratio))  # At least 1 from each
-        category_counts[category] = count
-        remaining -= count
+    # Calculate remaining places needed after including saved places
+    remaining_places_needed = 10 - len(mixed_recommendations)
     
-    # Distribute any remaining spots to personalized matches
-    if remaining > 0:
-        if destinations and len(destinations) > 0:
-            category_counts["destination_personalized"] += remaining
-        else:
-            category_counts["personalized"] += remaining
-    
-    # --- 1. TRENDING PLACES IN DESTINATIONS / GENERAL TRENDING ---
-    trending_category = "destination_trending" if destinations and len(destinations) > 0 else "trending"
-    if category_counts.get(trending_category, 0) > 0:
-        count = category_counts[trending_category]
-        recent_date = datetime.now() - timedelta(days=14)
+    # Only proceed with mixed recommendations if we need more places
+    if remaining_places_needed > 0:
+        # Recalculate counts based on remaining places needed
+        category_counts = {}
+        remaining = remaining_places_needed
+        for category, ratio in mix_ratios.items():
+            count = max(1, int(remaining_places_needed * ratio))
+            category_counts[category] = count
+            remaining -= count
         
-        if destinations and len(destinations) > 0:
-            # Get trending places in destinations
-            trending_pipeline = [
-                {"$match": {"timestamp": {"$gte": recent_date}}},
-                {"$lookup": {
-                    "from": "places", 
-                    "localField": "place_id", 
-                    "foreignField": "_id", 
-                    "as": "place_info"
-                }},
-                {"$unwind": "$place_info"},
-                {"$match": {"place_info.location.city": {"$in": destinations}}},
-                {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
-                {"$sort": {"count": -1}},
-                {"$limit": count * 2}
-            ]
+        # Distribute any remaining spots to personalized matches
+        if remaining > 0:
+            if destinations and len(destinations) > 0:
+                category_counts["destination_personalized"] += remaining
+            else:
+                category_counts["personalized"] += remaining
+        
+        # --- 1. TRENDING PLACES IN DESTINATIONS / GENERAL TRENDING ---
+        trending_category = "destination_trending" if destinations and len(destinations) > 0 else "trending"
+        if category_counts.get(trending_category, 0) > 0:
+            count = category_counts[trending_category]
+            recent_date = datetime.now() - timedelta(days=14)
             
-            try:
-                trending_in_dest = list(interactions_collection.aggregate(trending_pipeline))
+            if destinations and len(destinations) > 0:
+                # Get trending places in destinations
+                trending_pipeline = [
+                    {"$match": {"timestamp": {"$gte": recent_date}}},
+                    {"$lookup": {
+                        "from": "places", 
+                        "localField": "place_id", 
+                        "foreignField": "_id", 
+                        "as": "place_info"
+                    }},
+                    {"$unwind": "$place_info"},
+                    {"$match": {"place_info.location.city": {"$in": destinations}}},
+                    {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                    {"$limit": count * 2}
+                ]
                 
-                # Add trending in destinations
-                for item in trending_in_dest:
-                    if item["_id"] not in selected_place_ids:
-                        place = places_collection.find_one({"_id": item["_id"]})
-                        if place:
-                            mixed_recommendations.append({
-                                "place": place,
-                                "score": 0.8,  # High score for trending in destination
-                                "budget_score": 0.5,
-                                "accessibility_score": 0.5,
-                                "group_score": 0.5,
-                                "seasonal_score": 0.5,
-                                "source": "trending_in_destination"
-                            })
-                            selected_place_ids.add(place["_id"])
-                            logger.info(f"Added trending in destination: {place.get('name')}")
-            except Exception as e:
-                logger.error(f"Error getting trending in destinations: {str(e)}")
-        else:
-            # Get general trending places (when no destinations specified)
+                try:
+                    trending_in_dest = list(interactions_collection.aggregate(trending_pipeline))
+                    
+                    # Add trending in destinations
+                    for item in trending_in_dest:
+                        if item["_id"] not in selected_place_ids:
+                            place = places_collection.find_one({"_id": item["_id"]})
+                            if place:
+                                mixed_recommendations.append({
+                                    "place": place,
+                                    "score": 0.8,  # High score for trending in destination
+                                    "budget_score": 0.5,
+                                    "accessibility_score": 0.5,
+                                    "group_score": 0.5,
+                                    "seasonal_score": 0.5,
+                                    "source": "trending_in_destination"
+                                })
+                                selected_place_ids.add(place["_id"])
+                                logger.info(f"Added trending in destination: {place.get('name')}")
+                except Exception as e:
+                    logger.error(f"Error getting trending in destinations: {str(e)}")
+            else:
+                # Get general trending places (when no destinations specified)
+                try:
+                    general_trending = list(interactions_collection.aggregate([
+                        {"$match": {"timestamp": {"$gte": recent_date}}},
+                        {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
+                        {"$sort": {"count": -1}},
+                        {"$limit": count * 2}
+                    ]))
+                    
+                    for item in general_trending:
+                        if item["_id"] not in selected_place_ids:
+                            place = places_collection.find_one({"_id": item["_id"]})
+                            if place:
+                                mixed_recommendations.append({
+                                    "place": place,
+                                    "score": 0.6,  # Medium-high score for general trending
+                                    "budget_score": 0.5,
+                                    "accessibility_score": 0.5,
+                                    "group_score": 0.5,
+                                    "seasonal_score": 0.5,
+                                    "source": "trending_general"
+                                })
+                                selected_place_ids.add(place["_id"])
+                                logger.info(f"Added general trending: {place.get('name')}")
+                except Exception as e:
+                    logger.error(f"Error getting general trending places: {str(e)}")
+        
+        # --- 2. PERSONALIZED MATCHES IN DESTINATIONS / GENERAL PERSONALIZED ---
+        personalized_category = "destination_personalized" if destinations and len(destinations) > 0 else "personalized"
+        if category_counts.get(personalized_category, 0) > 0:
+            count = category_counts[personalized_category]
+            
+            # Choose which places to score based on destinations
+            candidate_places = destination_places if destinations and len(destinations) > 0 else filtered_places
+            candidate_places = [p for p in candidate_places if p["_id"] not in selected_place_ids]
+            
+            # Score places based on user preference match
+            scored_personalized = []
+            for place in candidate_places:
+                # 1. Budget score (30%)
+                place_budget = place.get("budget", "medium")
+                place_budget_level = map_budget_level(place_budget)
+                budget_score = calculate_budget_compatibility(place_budget_level, budget_level)
+                
+                # 2. Accessibility score (20%)
+                place_accessibility = place.get("accessibility", [])
+                if not isinstance(place_accessibility, list):
+                    place_accessibility = [place_accessibility] if place_accessibility else []
+                
+                accessibility_score = len(place_accessibility) / 10  # Normalize assuming max 10 features
+                
+                # 3. Group type score (30%)
+                group_score = 0.5  # Default score
+                place_group_type = place.get("group_type", "")
+                
+                if group_type and place_group_type:
+                    if group_type.lower() == place_group_type.lower():
+                        group_score = 1.0  # Exact match
+                    elif group_type.lower() in place_group_type.lower() or place_group_type.lower() in group_type.lower():
+                        group_score = 0.8  # Partial match
+                
+                # 4. Seasonal score (20%)
+                seasonal_score = 0.5  # Default score
+                appropriate_time = place.get("appropriate_time", [])
+                
+                if travel_month and appropriate_time and isinstance(appropriate_time, list):
+                    if travel_month in appropriate_time:
+                        seasonal_score = 1.0  # Direct month match
+                
+                # Calculate total weighted score
+                total_score = (
+                    budget_score * 0.3 +
+                    accessibility_score * 0.2 +
+                    group_score * 0.3 +
+                    seasonal_score * 0.2
+                )
+                
+                source_type = "personalized_in_destination" if destinations and len(destinations) > 0 else "personalized_match"
+                
+                scored_personalized.append({
+                    "place": place,
+                    "score": total_score,
+                    "budget_score": budget_score,
+                    "accessibility_score": accessibility_score,
+                    "group_score": group_score,
+                    "seasonal_score": seasonal_score,
+                    "source": source_type
+                })
+            
+            # Sort by score and get top matches
+            scored_personalized.sort(key=lambda x: x["score"], reverse=True)
+            
+            # Add top personalized matches
+            for item in scored_personalized[:count]:
+                if item["place"]["_id"] not in selected_place_ids:
+                    mixed_recommendations.append(item)
+                    selected_place_ids.add(item["place"]["_id"])
+                    logger.info(f"Added personalized match: {item['place'].get('name')} (score: {item['score']:.2f})")
+        
+        # --- 3. DIVERSITY / DISCOVERY IN DESTINATIONS / GENERAL DISCOVERY ---
+        discovery_category = "destination_discovery" if destinations and len(destinations) > 0 else "discovery"
+        if category_counts.get(discovery_category, 0) > 0:
+            count = category_counts[discovery_category]
+            
+            # Choose places from underrepresented categories
+            candidate_places = destination_places if destinations and len(destinations) > 0 else filtered_places
+            candidate_places = [p for p in candidate_places if p["_id"] not in selected_place_ids]
+            
+            # Extract categories from already selected places
+            selected_categories = []
+            for rec in mixed_recommendations:
+                place_category = rec["place"].get("category", "").lower()
+                if place_category:
+                    selected_categories.append(place_category)
+            
+            # Group candidate places by category
+            category_groups = {}
+            for place in candidate_places:
+                category = place.get("category", "").lower()
+                if not category:
+                    category = "uncategorized"
+                
+                if category not in category_groups:
+                    category_groups[category] = []
+                
+                category_groups[category].append(place)
+            
+            # Select from least represented categories first
+            diversity_picks = []
+            
+            # Count categories
+            category_counts_map = Counter(selected_categories)
+            
+            # Sort categories by frequency
+            sorted_categories = sorted(
+                category_groups.keys(),
+                key=lambda c: (category_counts_map.get(c, 0), -len(category_groups.get(c, [])))
+            )
+            
+            # Select diversity picks
+            for category in sorted_categories:
+                if len(diversity_picks) >= count:
+                    break
+                
+                places_in_cat = category_groups.get(category, [])
+                if places_in_cat:
+                    # Sort by rating for each category
+                    places_in_cat.sort(key=lambda p: float(p.get("rating", 0)), reverse=True)
+                    
+                    # Add top rated from category
+                    place = places_in_cat[0]
+                    source_type = "diversity_category_in_destination" if destinations and len(destinations) > 0 else "diversity_category"
+                    
+                    diversity_picks.append({
+                        "place": place,
+                        "score": 0.7,  # Medium-high score for diversity
+                        "budget_score": 0.5,
+                        "accessibility_score": 0.5,
+                        "group_score": 0.5,
+                        "seasonal_score": 0.5,
+                        "source": source_type
+                    })
+                    
+                    # Add to tracking
+                    selected_place_ids.add(place["_id"])
+                    selected_categories.append(category)
+                    logger.info(f"Added diversity pick: {place.get('name')} (category: {category})")
+            
+            # Add diversity picks to recommendations
+            mixed_recommendations.extend(diversity_picks)
+        
+        # --- 4. TOP RATED IN DESTINATIONS / GENERAL TOP RATED ---
+        top_category = "destination_top" if destinations and len(destinations) > 0 else "top_rated"
+        if category_counts.get(top_category, 0) > 0:
+            count = category_counts[top_category]
+            
+            # Choose places based on top ratings
+            candidate_places = destination_places if destinations and len(destinations) > 0 else filtered_places
+            candidate_places = [p for p in candidate_places if p["_id"] not in selected_place_ids]
+            
+            # Sort by rating
+            candidate_places.sort(key=lambda p: float(p.get("rating", 0)), reverse=True)
+            
+            # Add top rated
+            added = 0
+            for place in candidate_places:
+                if added >= count:
+                    break
+                
+                source_type = "top_rated_in_destination" if destinations and len(destinations) > 0 else "top_rated"
+                mixed_recommendations.append({
+                    "place": place,
+                    "score": 0.65,  # Medium score for top rated
+                    "budget_score": 0.5,
+                    "accessibility_score": 0.5,
+                    "group_score": 0.5,
+                    "seasonal_score": 0.5,
+                    "source": source_type
+                })
+                
+                selected_place_ids.add(place["_id"])
+                added += 1
+                logger.info(f"Added top rated: {place.get('name')} (rating: {place.get('rating', 'N/A')})")
+    
+    # --- FALLBACK MECHANISMS ---
+    # If we still don't have 10 places, implement fallbacks
+    if len(mixed_recommendations) < 10:
+        needed = 10 - len(mixed_recommendations)
+        logger.info(f"Need {needed} more places after mixed recommendations, using fallbacks")
+        
+        # FALLBACK 1: Look for nearby places (within 100km of destination places)
+        if destinations and len(destinations) > 0 and len(destination_places) > 0:
+            logger.info("Using nearby places fallback")
+            
+            # Find places near destination places
+            nearby_places = []
+            for dest_place in destination_places:
+                if dest_place["_id"] in selected_place_ids:
+                    continue
+                
+                dest_location = dest_place.get("location", {})
+                if "latitude" in dest_location and "longitude" in dest_location:
+                    dest_lat = dest_location["latitude"]
+                    dest_lon = dest_location["longitude"]
+                    
+                    # Find places within 100km
+                    for place in filtered_places:
+                        if place["_id"] in selected_place_ids:
+                            continue
+                        
+                        place_location = place.get("location", {})
+                        if "latitude" in place_location and "longitude" in place_location:
+                            place_lat = place_location["latitude"]
+                            place_lon = place_location["longitude"]
+                            
+                            # Calculate distance
+                            distance = calculate_distance(dest_lat, dest_lon, place_lat, place_lon)
+                            
+                            if distance <= 100:  # 100km radius
+                                nearby_places.append({
+                                    "place": place,
+                                    "distance": distance,
+                                    "score": 0.5,  # Medium score for nearby
+                                    "budget_score": 0.5,
+                                    "accessibility_score": 0.5,
+                                    "group_score": 0.5,
+                                    "seasonal_score": 0.5,
+                                    "source": "nearby_to_destination"
+                                })
+            
+            # Sort by distance
+            nearby_places.sort(key=lambda x: x["distance"])
+            
+            # Add nearby places
+            for item in nearby_places:
+                if len(mixed_recommendations) >= 10:
+                    break
+                
+                place = item["place"]
+                if place["_id"] not in selected_place_ids:
+                    mixed_recommendations.append(item)
+                    selected_place_ids.add(place["_id"])
+                    logger.info(f"Added nearby place: {place.get('name')} ({item['distance']:.1f}km)")
+        
+        # FALLBACK 2: Trending places (regardless of destination)
+        if len(mixed_recommendations) < 10:
+            logger.info("Using trending places fallback")
+            
+            recent_date = datetime.now() - timedelta(days=14)
+            needed = 10 - len(mixed_recommendations)
+            
             try:
                 general_trending = list(interactions_collection.aggregate([
                     {"$match": {"timestamp": {"$gte": recent_date}}},
                     {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
                     {"$sort": {"count": -1}},
-                    {"$limit": count * 2}
+                    {"$limit": needed * 2}
                 ]))
                 
                 for item in general_trending:
+                    if len(mixed_recommendations) >= 10:
+                        break
+                        
                     if item["_id"] not in selected_place_ids:
                         place = places_collection.find_one({"_id": item["_id"]})
                         if place:
                             mixed_recommendations.append({
                                 "place": place,
-                                "score": 0.6,  # Medium-high score for general trending
+                                "score": 0.4,  # Lower score for fallback trending
                                 "budget_score": 0.5,
                                 "accessibility_score": 0.5,
                                 "group_score": 0.5,
                                 "seasonal_score": 0.5,
-                                "source": "trending_general"
+                                "source": "trending_outside_destination"
                             })
                             selected_place_ids.add(place["_id"])
-                            logger.info(f"Added general trending: {place.get('name')}")
+                            logger.info(f"Added fallback trending: {place.get('name')}")
             except Exception as e:
-                logger.error(f"Error getting general trending places: {str(e)}")
-    
-    # --- 2. PERSONALIZED MATCHES IN DESTINATIONS / GENERAL PERSONALIZED ---
-    personalized_category = "destination_personalized" if destinations and len(destinations) > 0 else "personalized"
-    if category_counts.get(personalized_category, 0) > 0:
-        count = category_counts[personalized_category]
+                logger.error(f"Error getting fallback trending places: {str(e)}")
         
-        # Choose which places to score based on destinations
-        candidate_places = destination_places if destinations and len(destinations) > 0 else filtered_places
-        candidate_places = [p for p in candidate_places if p["_id"] not in selected_place_ids]
-        
-        # Score places based on user preference match
-        scored_personalized = []
-        for place in candidate_places:
-            # 1. Budget score (30%)
-            place_budget = place.get("budget", "medium")
-            place_budget_level = map_budget_level(place_budget)
-            budget_score = calculate_budget_compatibility(place_budget_level, budget_level)
+        # FALLBACK 3: Top rated places (last resort)
+        if len(mixed_recommendations) < 10:
+            logger.info("Using top rated fallback")
             
-            # 2. Accessibility score (20%)
-            place_accessibility = place.get("accessibility", [])
-            if not isinstance(place_accessibility, list):
-                place_accessibility = [place_accessibility] if place_accessibility else []
+            remaining_places = [p for p in all_places if p["_id"] not in selected_place_ids]
+            remaining_places.sort(key=lambda p: float(p.get("rating", 0)), reverse=True)
             
-            accessibility_score = len(place_accessibility) / 10  # Normalize assuming max 10 features
-            
-            # 3. Group type score (30%)
-            group_score = 0.5  # Default score
-            place_group_type = place.get("group_type", "")
-            
-            if group_type and place_group_type:
-                if group_type.lower() == place_group_type.lower():
-                    group_score = 1.0  # Exact match
-                elif group_type.lower() in place_group_type.lower() or place_group_type.lower() in group_type.lower():
-                    group_score = 0.8  # Partial match
-            
-            # 4. Seasonal score (20%)
-            seasonal_score = 0.5  # Default score
-            appropriate_time = place.get("appropriate_time", [])
-            
-            if travel_month and appropriate_time and isinstance(appropriate_time, list):
-                if travel_month in appropriate_time:
-                    seasonal_score = 1.0  # Direct month match
-            
-            # Calculate total weighted score
-            total_score = (
-                budget_score * 0.3 +
-                accessibility_score * 0.2 +
-                group_score * 0.3 +
-                seasonal_score * 0.2
-            )
-            
-            source_type = "personalized_in_destination" if destinations and len(destinations) > 0 else "personalized_match"
-            scored_personalized.append({
-                "place": place,
-                "score": total_score,
-                "budget_score": budget_score,
-                "accessibility_score": accessibility_score,
-                "group_score": group_score,
-                "seasonal_score": seasonal_score,
-                "source": source_type
-            })
-        
-        # Sort by score and take the top ones
-        scored_personalized.sort(key=lambda x: x["score"], reverse=True)
-        for item in scored_personalized[:count]:
-            if item["place"]["_id"] not in selected_place_ids:
-                mixed_recommendations.append(item)
-                selected_place_ids.add(item["place"]["_id"])
-                logger.info(f"Added {item['source']}: {item['place'].get('name')} (score: {item['score']:.2f})")
-    
-    # --- 3. DISCOVERY/DIVERSITY IN DESTINATIONS / GENERAL DISCOVERY ---
-    discovery_category = "destination_discovery" if destinations and len(destinations) > 0 else "discovery"
-    if category_counts.get(discovery_category, 0) > 0:
-        count = category_counts[discovery_category]
-        discovery_places = []
-        
-        # Choose base places based on destinations
-        candidate_places = destination_places if destinations and len(destinations) > 0 else filtered_places
-        candidate_places = [p for p in candidate_places if p["_id"] not in selected_place_ids]
-        
-        # Get current recommendation categories to find under-represented ones
-        recommendation_categories = {}
-        for rec in mixed_recommendations:
-            category = rec["place"].get("category", "unknown")
-            recommendation_categories[category] = recommendation_categories.get(category, 0) + 1
-        
-        # Find all categories in the candidate set
-        all_categories = {}
-        for place in candidate_places:
-            category = place.get("category", "unknown")
-            all_categories[category] = all_categories.get(category, 0) + 1
-        
-        # Identify under-represented categories (those in all_categories but not or rarely in recommendation_categories)
-        underrepresented = []
-        for cat in all_categories:
-            if cat not in recommendation_categories or recommendation_categories[cat] <= 1:
-                underrepresented.append(cat)
-        
-        # Get places from underrepresented categories
-        diverse_category_places = []
-        for place in candidate_places:
-            category = place.get("category", "unknown")
-            if category in underrepresented:
-                diverse_category_places.append({
-                    "place": place,
-                    "score": 0.5,  # Base score
-                    "budget_score": 0.5,
-                    "accessibility_score": 0.5,
-                    "group_score": 0.5,
-                    "seasonal_score": 0.5,
-                    "source": "diversity_category" + ("_in_destination" if destinations and len(destinations) > 0 else "")
-                })
-        
-        # Sort by rating (highest first)
-        diverse_category_places.sort(key=lambda x: x["place"].get("average_rating", 0), reverse=True)
-        
-        # Add top diverse category places
-        for item in diverse_category_places[:count]:
-            if item["place"]["_id"] not in selected_place_ids:
-                mixed_recommendations.append(item)
-                selected_place_ids.add(item["place"]["_id"])
-                logger.info(f"Added {item['source']}: {item['place'].get('name')} (category: {item['place'].get('category', 'unknown')})")
-    
-    # --- 4. TOP RATED IN DESTINATIONS / GENERAL TOP RATED ---
-    top_category = "destination_top" if destinations and len(destinations) > 0 else "top_rated"
-    if category_counts.get(top_category, 0) > 0:
-        count = category_counts[top_category]
-        
-        # Choose which places to get top-rated from
-        if destinations and len(destinations) > 0:
-            # Get top-rated places in destinations
-            top_places_query = {
-                "_id": {"$nin": list(selected_place_ids)},
-                "location.city": {"$in": destinations}
-            }
-        else:
-            # Get general top-rated places
-            top_places_query = {
-                "_id": {"$nin": list(selected_place_ids)}
-            }
-        
-        top_places = list(places_collection.find(top_places_query).sort("average_rating", -1).limit(count))
-        
-        for place in top_places:
-            source_type = "top_rated_in_destination" if destinations and len(destinations) > 0 else "top_rated_general"
-            mixed_recommendations.append({
-                "place": place,
-                "score": 0.4,  # Medium score for top-rated
-                "budget_score": 0.5,
-                "accessibility_score": 0.5,
-                "group_score": 0.5,
-                "seasonal_score": 0.5,
-                "source": source_type
-            })
-            selected_place_ids.add(place["_id"])
-            logger.info(f"Added {source_type}: {place.get('name')}")
-    
-    # --- FALLBACK SECTION: LOOK OUTSIDE DESTINATIONS IF NEEDED ---
-    if len(mixed_recommendations) < 10 and destinations and len(destinations) > 0:
-        remaining = 10 - len(mixed_recommendations)
-        logger.info(f"Could not find enough places in requested destinations, expanding search (need {remaining} more)")
-        
-        # Add warning about expanding beyond destinations
-        if not any(w["type"] == "destination" for w in roadmap_warnings):
-            roadmap_warnings.append({
-                "type": "destination_expansion",
-                "message": f"Not enough places found in your requested destinations. We've included some places outside your specified areas to complete your roadmap."
-            })
-        
-        # FALLBACK 1: Try nearby places first (within 100km of destination places)
-        if len(destination_places) > 0:
-            # Get locations of destination places
-            reference_locations = []
-            for place in destination_places:
-                loc = place.get("location", {})
-                lat = loc.get("latitude")
-                lng = loc.get("longitude")
-                if lat is not None and lng is not None:
-                    reference_locations.append((lat, lng, place["_id"]))
-            
-            # Look for nearby places not in destinations
-            nearby_places = []
-            non_destination_places = [p for p in filtered_places if p["_id"] not in [dp["_id"] for dp in destination_places]]
-            
-            for place in non_destination_places:
-                if place["_id"] in selected_place_ids:
-                    continue
-                    
-                loc = place.get("location", {})
-                lat = loc.get("latitude")
-                lng = loc.get("longitude")
-                
-                if lat is not None and lng is not None:
-                    # Find minimum distance to any destination place
-                    min_distance = float('inf')
-                    for curr_lat, curr_lng, curr_id in reference_locations:
-                        try:
-                            distance = geodesic((lat, lng), (curr_lat, curr_lng)).kilometers
-                            min_distance = min(min_distance, distance)
-                        except Exception:
-                            continue
-                    
-                    # If within reasonable distance (100km), add to nearby places
-                    if min_distance < 100:
-                        nearby_places.append({
-                            "place": place,
-                            "distance": min_distance,
-                            "score": max(0.2, 0.4 - (min_distance / 500)),  # Score decreases with distance
-                            "budget_score": 0.5,
-                            "accessibility_score": 0.5,
-                            "group_score": 0.5,
-                            "seasonal_score": 0.5,
-                            "source": "nearby_to_destination"
-                        })
-            
-            # Sort by distance and add to recommendations
-            nearby_places.sort(key=lambda x: x["distance"])
-            for item in nearby_places[:remaining]:
-                mixed_recommendations.append(item)
-                selected_place_ids.add(item["place"]["_id"])
-                logger.info(f"Added nearby to destination: {item['place'].get('name')} ({item['distance']:.1f}km)")
-                
-                # Update how many more we need
-                remaining = 10 - len(mixed_recommendations)
-                if remaining <= 0:
+            for place in remaining_places:
+                if len(mixed_recommendations) >= 10:
                     break
-        
-        # FALLBACK 2: If still not enough, add trending places outside destinations
-        if remaining > 0:
-            logger.info(f"Need {remaining} more places, adding trending places outside destinations")
-            
-            recent_date = datetime.now() - timedelta(days=14)
-            trending_interactions = list(interactions_collection.aggregate([
-                {"$match": {"timestamp": {"$gte": recent_date}}},
-                {"$group": {"_id": "$place_id", "count": {"$sum": 1}}},
-                {"$sort": {"count": -1}},
-                {"$limit": remaining * 2}
-            ]))
-            
-            trending_place_ids = [item["_id"] for item in trending_interactions]
-            
-            # Filter out places already in roadmap
-            trending_place_ids = [pid for pid in trending_place_ids 
-                                if pid not in selected_place_ids]
-            
-            # Get place details
-            if trending_place_ids:
-                trending_places = list(places_collection.find({"_id": {"$in": trending_place_ids}}))
-                
-                for place in trending_places[:remaining]:
-                    mixed_recommendations.append({
-                        "place": place,
-                        "score": 0.3,  # Lower score for fallback
-                        "budget_score": 0.5,
-                        "accessibility_score": 0.5,
-                        "group_score": 0.5,
-                        "seasonal_score": 0.5,
-                        "source": "trending_outside_destination"
-                    })
-                    selected_place_ids.add(place["_id"])
-                    logger.info(f"Added trending outside destination: {place.get('name')}")
                     
-                    # Update how many more we need
-                    remaining = 10 - len(mixed_recommendations)
-                    if remaining <= 0:
-                        break
-        
-        # FALLBACK 3: Final fallback - add any top-rated places
-        if remaining > 0:
-            logger.info(f"Need {remaining} more places, adding top-rated places outside destinations")
-            
-            # Exclude places already in roadmap
-            top_places = list(places_collection.find(
-                {"_id": {"$nin": list(selected_place_ids)}}
-            ).sort("average_rating", -1).limit(remaining))
-            
-            for place in top_places:
                 mixed_recommendations.append({
                     "place": place,
-                    "score": 0.2,  # Lowest score for fallback
+                    "score": 0.3,  # Low score for last resort
                     "budget_score": 0.5,
                     "accessibility_score": 0.5,
                     "group_score": 0.5,
@@ -2986,52 +3053,36 @@ def generate_hybrid_roadmap(user_id):
                     "source": "fallback_outside_destination"
                 })
                 selected_place_ids.add(place["_id"])
-                logger.info(f"Added fallback outside destination: {place.get('name')}")
+                logger.info(f"Added fallback top rated: {place.get('name')}")
+    
+    # Ensure we have exactly 10 places (trim if more than 10)
+    if len(mixed_recommendations) > 10:
+        mixed_recommendations = mixed_recommendations[:10]
+    
+    # Sort by score for final ordering
+    mixed_recommendations.sort(key=lambda x: x["score"], reverse=True)
     
     # Prepare final roadmap
-    roadmap = {
-        "start_date": travel_dates,
-        "budget_level": budget_level,
-        "group_type": group_type,
-        "places": [],
-        "routes": [],
-        "accessibility_needs": accessibility_needs,
-        "seasonal_weights": {travel_month: 1.0} if travel_month else {},
-        "warnings": roadmap_warnings  # Add warnings to the roadmap
-    }
-    
-    # Add recommendations to roadmap (limit to 10)
-    for rec in mixed_recommendations[:10]:
+    places = []
+    for rec in mixed_recommendations:
+        # Add match scores to the place
         place = rec["place"]
-        
-        # Add score details for explanation
         place["match_scores"] = {
-            "total": rec["score"],
-            "budget": rec.get("budget_score", 0.5),
-            "accessibility": rec.get("accessibility_score", 0.5),
-            "group": rec.get("group_score", 0.5),
-            "seasonal": rec.get("seasonal_score", 0.5),
+            "overall": rec["score"],
+            "budget": rec["budget_score"],
+            "accessibility": rec["accessibility_score"],
+            "group": rec["group_score"],
+            "seasonal": rec["seasonal_score"],
             "source": rec["source"]
         }
-        
-        roadmap["places"].append(place)
+        places.append(place)
     
-    # Ensure we have exactly 10 places (trim if somehow more)
-    roadmap["places"] = roadmap["places"][:10]
-    
-    # Add routes between places
-    if len(roadmap["places"]) >= 2:
-        for i in range(len(roadmap["places"]) - 1):
-            place1 = roadmap["places"][i]
-            place2 = roadmap["places"][i + 1]
-            
-            roadmap["routes"].append({
-                "from": place1["_id"],
-                "to": place2["_id"],
-                "from_name": place1.get("name", ""),
-                "to_name": place2.get("name", ""),
-                "type": "direct"
-            })
+    # Build roadmap with places and routes
+    roadmap = {
+        "places": places,
+        "routes": generate_routes(places),
+        "warnings": roadmap_warnings
+    }
     
     # Add a summary of warnings at the top level for API consumers
     if roadmap_warnings:
@@ -3040,6 +3091,12 @@ def generate_hybrid_roadmap(user_id):
         roadmap["warning_summary"] = f"This roadmap has {len(roadmap_warnings)} warning(s): {', '.join(warning_types)}"
     else:
         roadmap["has_warnings"] = False
+    
+    # Add information about saved places if any were included
+    saved_places_count = sum(1 for rec in mixed_recommendations if rec.get("source") == "saved_place")
+    if saved_places_count > 0:
+        roadmap["saved_places_included"] = saved_places_count
+        logger.info(f"Included {saved_places_count} saved places in the roadmap")
     
     logger.info(f"Generated roadmap with {len(roadmap['places'])} places and {len(roadmap['routes'])} routes")
     return roadmap

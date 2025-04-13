@@ -634,12 +634,26 @@ def extract_search_keywords(user_id, user_preferences=None, max_keywords=5):
         # Get all relevant words from categories and tags
         all_words = []
         
-        # Add categories with multiplier for importance
+        # Process categories - translate if needed
         for category in categories:
+            # Check language and translate if needed
+            cat_lang = detect_language(category)
+            if cat_lang != 'en':
+                orig_category = category
+                category = translate_to_english(category)
+                logger.debug(f"Translated category '{orig_category}' ({cat_lang}) to '{category}'")
+            
             all_words.extend([category] * 3)  # Higher weight for categories
             
-        # Add tags
-        all_words.extend(tags)
+        # Process tags - translate if needed
+        for tag in tags:
+            tag_lang = detect_language(tag)
+            if tag_lang != 'en':
+                orig_tag = tag
+                tag = translate_to_english(tag)
+                logger.debug(f"Translated tag '{orig_tag}' ({tag_lang}) to '{tag}'")
+            
+            all_words.append(tag)
         
         # Extract additional relevant terms using NLP
         if nlp:
@@ -683,7 +697,6 @@ def extract_search_keywords(user_id, user_preferences=None, max_keywords=5):
     except Exception as e:
         logger.error(f"Error extracting search keywords for user {user_id}: {e}")
         return []
-
 
 def parse_travel_dates(travel_dates_str):
     """

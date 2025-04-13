@@ -3932,7 +3932,7 @@ async def get_search_history(
     limit: int = Query(10, ge=1, le=50)
 ):
     """
-    Get search history for a user
+    Get search history for a user, including original and translated queries
     
     Args:
         user_id: User ID
@@ -3940,19 +3940,36 @@ async def get_search_history(
     """
     try:
         # Get search history sorted by newest first
+        # Include translated_query and detected_language fields
         history = list(
             search_queries_collection.find(
                 {"user_id": user_id},
-                {"_id": 0, "user_id": 1, "query": 1, "timestamp": 1}
+                {
+                    "_id": 0, 
+                    "user_id": 1, 
+                    "query": 1, 
+                    "translated_query": 1,
+                    "detected_language": 1,
+                    "timestamp": 1
+                }
             )
             .sort("timestamp", -1)
             .limit(limit)
         )
         
-        # Format timestamps
+        # Format timestamps and handle older records without translation fields
         for item in history:
+            # Format timestamp
             if "timestamp" in item and not isinstance(item["timestamp"], str):
                 item["timestamp"] = item["timestamp"].isoformat()
+            
+            # Ensure translation fields exist (for backward compatibility)
+            if "detected_language" not in item:
+                item["detected_language"] = "en"
+            
+            if "translated_query" not in item and "query" in item:
+                # If this is an old record without translation, they're the same
+                item["translated_query"] = None
         
         return {
             "success": True,
@@ -3967,7 +3984,6 @@ async def get_search_history(
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
 @app.delete("/search-history/{user_id}")
 async def clear_search_history(user_id: str):
     """

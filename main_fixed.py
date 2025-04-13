@@ -2171,6 +2171,7 @@ def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recom
 async def background_cache_recommendations(user_id, num_entries=6):
     """
     Generate and cache recommendation entries for a user in the background.
+    Uses lazy loading to generate recommendations in batches.
     
     Args:
         user_id: User ID
@@ -2228,50 +2229,68 @@ async def background_cache_recommendations(user_id, num_entries=6):
         # Generate recommendations in sequence
         logger.info(f"Generating {num_entries} cache entries for user {user_id}")
         
-        # Generate a large pool of recommendations that haven't been shown to the user
-        # This ensures we have enough variety for multiple cache entries
-        large_pool_size = num_entries * 20  # Generate enough for variety
-        large_recommendation_pool = generate_final_recommendations(
-            user_id, 
-            large_pool_size, 
-            previously_shown_ids
-        )
+        # Initialize tracking variables for lazy loading
+        entries_created = 0
+        batch_size = 20  # Start with smaller batch sizes
+        recommendations_pool = []
+        used_place_ids = set(previously_shown_ids)  # Track used places
         
-        # Shuffle the large pool to ensure randomness
-        random.shuffle(large_recommendation_pool)
-        
+        # Generate cache entries one by one using lazy loading
         for i in range(num_entries):
+            if entries_created >= num_entries:
+                break
+                
             try:
-                # Generate with slightly different weights for variety
-                randomization_seed = next_sequence + i + int(datetime.now().timestamp())
-                random.seed(randomization_seed)
-                
-                # Wait a small amount of time between generations for variety
-                await asyncio.sleep(0.5)
-                
-                # Take a subset of the large pool for this cache entry
-                start_idx = (i * 15) % len(large_recommendation_pool)
-                
-                # If we don't have enough recommendations left, add some randomness
-                if start_idx + 10 > len(large_recommendation_pool):
-                    recommendations = large_recommendation_pool[:10]
-                    random.shuffle(recommendations)
-                else:
-                    # Take 10 recommendations starting from our position in the pool
-                    recommendations = large_recommendation_pool[start_idx:start_idx + 10]
-                
-                # Ensure we have exactly 10 recommendations
-                if len(recommendations) < 10:
-                    # Generate fallback recommendations if needed
-                    fallback_count = 10 - len(recommendations)
-                    existing_rec_ids = [r["_id"] for r in recommendations]
+                # Check if we need more recommendations
+                if len(recommendations_pool) < 10:
+                    # Generate a new batch
+                    logger.info(f"Generating batch of {batch_size} recommendations for pool")
                     
-                    # Generate new recommendations excluding both previously shown and those already in our cache
-                    exclude_ids = previously_shown_ids + existing_rec_ids
+                    # Generate with slightly different weights for variety
+                    randomization_seed = next_sequence + i + int(datetime.now().timestamp())
+                    random.seed(randomization_seed)
+                    
+                    # Generate batch of new recommendations excluding shown and used places
+                    exclude_ids = list(used_place_ids)
+                    batch = generate_final_recommendations(user_id, batch_size, exclude_ids)
+                    
+                    # Add to pool and mark as used
+                    for rec in batch:
+                        if rec["_id"] not in used_place_ids:
+                            recommendations_pool.append(rec)
+                            used_place_ids.add(rec["_id"])
+                    
+                    # If we got less than expected, increase batch size for next round
+                    if len(batch) < batch_size:
+                        batch_size = min(batch_size * 2, 50)  # Double but cap at 50
+                    
+                    # Ensure we have variety by shuffling
+                    random.shuffle(recommendations_pool)
+                
+                # If we still don't have enough recommendations, try fallback approach
+                if len(recommendations_pool) < 10:
+                    # Generate fallback recommendations
+                    fallback_count = 10 - len(recommendations_pool)
+                    existing_rec_ids = [r["_id"] for r in recommendations_pool]
+                    
+                    # Generate new recommendations excluding both previously shown and those already in our pool
+                    exclude_ids = list(used_place_ids)
                     fallbacks = generate_final_recommendations(user_id, fallback_count, exclude_ids)
                     
-                    # Add fallbacks to recommendations
-                    recommendations.extend(fallbacks)
+                    # Add fallbacks to pool
+                    for rec in fallbacks:
+                        if rec["_id"] not in used_place_ids:
+                            recommendations_pool.append(rec)
+                            used_place_ids.add(rec["_id"])
+                
+                # If we still don't have enough, continue to next iteration
+                if len(recommendations_pool) < 10:
+                    logger.warning(f"Not enough recommendations for cache entry {i+1}, got {len(recommendations_pool)}")
+                    continue
+                
+                # Take 10 recommendations from the pool
+                recommendations = recommendations_pool[:10]
+                recommendations_pool = recommendations_pool[10:]
                 
                 # Store in cache with incrementing sequence
                 sequence = next_sequence + i
@@ -2285,11 +2304,15 @@ async def background_cache_recommendations(user_id, num_entries=6):
                     "generation_params": {
                         "randomization_seed": randomization_seed,
                         "excluded_shown_count": len(previously_shown_ids),
-                        "from_large_pool": True
+                        "lazy_loading": True
                     }
                 })
                 
-                logger.info(f"Generated cache entry {i+1}/{num_entries} for user {user_id} (sequence {sequence})")
+                entries_created += 1
+                logger.info(f"Generated cache entry {entries_created}/{num_entries} for user {user_id} (sequence {sequence})")
+                
+                # Add a delay between generations for variety
+                await asyncio.sleep(0.5)
                 
             except Exception as entry_error:
                 logger.error(f"Error generating cache entry {i+1}/{num_entries}: {entry_error}")

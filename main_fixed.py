@@ -1305,6 +1305,10 @@ def get_collaborative_recommendations(user_id, target_count=10, excluded_place_i
         return []
 def calculate_similarity_score(user1, user2):
     try:
+        # Get user IDs for better logging
+        user1_id = user1.get("_id", "unknown")
+        user2_id = user2.get("_id", "unknown")
+        
         # Get preferences
         prefs1 = user1.get("preferences", {})
         prefs2 = user2.get("preferences", {})
@@ -1312,33 +1316,25 @@ def calculate_similarity_score(user1, user2):
         if not prefs1 or not prefs2:
             return 0.3  # Default modest similarity when preferences missing
         
-        similarity_score = 0.0
-        factors_count = 0
-        
         # 1. Category similarity (weighted 40%)
-        # Changed to look for "categories" instead of "preferred_categories"
         cats1 = set(prefs1.get("categories", []))
         cats2 = set(prefs2.get("categories", []))
         
+        category_jaccard = 0
         if cats1 and cats2:
             # Jaccard similarity for categories
             category_jaccard = len(cats1.intersection(cats2)) / max(len(cats1.union(cats2)), 1)
-            similarity_score += category_jaccard * 0.4
-            factors_count += 1
-        
+            
         # 2. Tag similarity (weighted 40%)
-        # Changed to look for "tags" instead of "preferred_tags"
         tags1 = set(prefs1.get("tags", []))
         tags2 = set(prefs2.get("tags", []))
         
+        tag_jaccard = 0
         if tags1 and tags2:
             # Jaccard similarity for tags
             tag_jaccard = len(tags1.intersection(tags2)) / max(len(tags1.union(tags2)), 1)
-            similarity_score += tag_jaccard * 0.4
-            factors_count += 1
         
         # 3. Activity level similarity (weighted 20%) 
-        # Using a default value since this might not exist in your data
         activity1 = prefs1.get("activity_level", "medium")
         activity2 = prefs2.get("activity_level", "medium")
         
@@ -1349,25 +1345,34 @@ def calculate_similarity_score(user1, user2):
              (activity1 in ["medium", "low"] and activity2 in ["medium", "low"]):
             # Adjacent activity levels
             activity_score = 0.5
-            
-        similarity_score += activity_score * 0.2
-        factors_count += 1
         
-        # Add debug logging to see the calculated similarity
-        logger.info(f"Similarity between users: cats1={cats1}, cats2={cats2}, tags1={tags1}, tags2={tags2}, score={similarity_score}")
+        # Calculate total score with weightings
+        category_contribution = category_jaccard * 0.4
+        tag_contribution = tag_jaccard * 0.4
+        activity_contribution = activity_score * 0.2
         
-        # Normalize if we have factors
-        final_score = similarity_score / factors_count if factors_count > 0 else 0.3
+        # Compute final score - important changes here
+        # We weight the scores differently to avoid the need for normalization
+        # and ensure we get higher similarity values
+        similarity_score = category_contribution + tag_contribution + activity_contribution
         
-        # Boost score slightly to encourage more recommendations
-        boosted_score = min(1.0, final_score * 1.2)
+        # Boost the score to increase matches - increased boost factor from 1.2 to 1.5
+        # to ensure more users cross the threshold
+        boosted_score = min(1.0, similarity_score * 1.5)
+        
+        # More detailed logging with the actual components
+        logger.debug(f"Similarity details for {user1_id}-{user2_id}: " +
+                   f"cats: {category_jaccard:.2f}*0.4={category_contribution:.2f}, " +
+                   f"tags: {tag_jaccard:.2f}*0.4={tag_contribution:.2f}, " +
+                   f"activity: {activity_score:.2f}*0.2={activity_contribution:.2f}, " +
+                   f"total: {similarity_score:.2f}, boosted: {boosted_score:.2f}")
         
         return boosted_score
         
     except Exception as e:
         logger.error(f"Error calculating user similarity: {str(e)}")
         return 0.3  # Default modest similarity on error
-def find_similar_users(user_id, min_similarity=0.25, max_users=40):
+def find_similar_users(user_id, min_similarity=0.15, max_users=40):  # Lowered threshold from 0.25 to 0.15
     """
     Find users similar to the given user based on preferences and interactions,
     with caching for improved performance.
@@ -1403,6 +1408,7 @@ def find_similar_users(user_id, min_similarity=0.25, max_users=40):
         all_users = list(users_collection.find({"_id": {"$ne": user_id}}))
         
         similar_users = []
+        all_scored_users = []  # Track all users with their scores for fallback
         
         for other_user in all_users:
             other_id = other_user["_id"]
@@ -1410,19 +1416,38 @@ def find_similar_users(user_id, min_similarity=0.25, max_users=40):
             # Calculate base similarity score between users
             similarity_score = calculate_similarity_score(user_doc, other_user)
             
-            # Add debug logging
-            logger.info(f"Similarity between {user_id} and {other_id}: {similarity_score}")
+            # Track all users with their scores for potential fallback
+            all_scored_users.append({
+                "user_id": other_id,
+                "similarity": similarity_score
+            })
             
-            # Only include users above minimum similarity
+            # Only include users above minimum similarity in the main list
             if similarity_score >= min_similarity:
                 similar_users.append({
                     "user_id": other_id,
                     "similarity": similarity_score
                 })
+                logger.info(f"Found similar user {other_id} with score {similarity_score:.2f}")
         
         # Sort by similarity (descending) and take top users
         similar_users.sort(key=lambda x: x["similarity"], reverse=True)
         similar_users = similar_users[:max_users]
+        
+        # If no similar users above threshold, use fallback
+        if len(similar_users) == 0 and len(all_scored_users) > 0:
+            logger.info(f"No users above similarity threshold {min_similarity}. Using best available matches.")
+            
+            # Sort and take top 5 regardless of threshold
+            all_scored_users.sort(key=lambda x: x["similarity"], reverse=True)
+            similar_users = all_scored_users[:5]
+            
+            logger.info(f"Using {len(similar_users)} fallback similar users with lower similarity")
+            
+            # Log the top fallback user
+            if similar_users:
+                top_user = similar_users[0]
+                logger.info(f"Top fallback user: {top_user['user_id']} with similarity {top_user['similarity']:.2f}")
         
         # Cache the result
         similar_users_cache.update_one(
@@ -1434,6 +1459,9 @@ def find_similar_users(user_id, min_similarity=0.25, max_users=40):
             }},
             upsert=True
         )
+        
+        # Log summary
+        logger.info(f"Found {len(similar_users)} similar users for user {user_id}")
         
         return similar_users
         

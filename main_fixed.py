@@ -2514,6 +2514,8 @@ def check_accessibility_compatibility(place, accessibility_needs):
             return False
     
     return True
+
+from collections import Counter
 def generate_hybrid_roadmap(user_id):
     """
     Generate a travel roadmap for a user using a hybrid approach with mixed recommendation strategies.

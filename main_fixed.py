@@ -1151,72 +1151,40 @@ def get_candidate_places(user_preferences, user_id, size=30):
 import math
 from datetime import datetime, timedelta
 
-def get_collaborative_recommendations(user_id):
+def get_collaborative_recommendations(user_id, target_count=10, excluded_place_ids=None):
     """
-    Get place recommendations based on similar users' interactions.
+    Get place recommendations based on similar users' interactions,
+    with caching of similar users for improved performance.
     
     Args:
         user_id: User ID to get recommendations for
+        target_count: Number of recommendations to generate
+        excluded_place_ids: Place IDs to exclude
         
     Returns:
-        List of place IDs recommended through collaborative filtering
+        List of recommended places through collaborative filtering
     """
     try:
         logger.info(f"Finding collaborative recommendations for user {user_id}")
+        
+        if excluded_place_ids is None:
+            excluded_place_ids = []
+            
         user = users_collection.find_one({"_id": user_id})
         if not user:
             logger.warning(f"User {user_id} not found")
             return []
 
-        # Get user preferences
-        user_prefs = user.get("preferences", {})
-        preferred_categories = user_prefs.get("preferred_categories", [])
-        preferred_tags = user_prefs.get("preferred_tags", [])
-
-        # Find similar users using fuzzy matching
-        # Use both exact and pattern matches for greater flexibility
-        similar_users_query = {
-            "_id": {"$ne": user_id},  # Exclude current user
-            "$or": []  # Will add conditions below
-        }
-        
-        # Add category conditions if we have categories
-        if preferred_categories:
-            # Add exact match condition
-            similar_users_query["$or"].append(
-                {"preferences.preferred_categories": {"$in": preferred_categories}}
-            )
-            
-            # Add partial match conditions for each category
-            for category in preferred_categories:
-                if category and len(category) > 3:  # Only use meaningful categories
-                    # Find users with categories that contain this category as a substring
-                    similar_users_query["$or"].append(
-                        {"preferences.preferred_categories": {"$regex": category, "$options": "i"}}
-                    )
-        
-        # Add tag conditions if we have tags
-        if preferred_tags:
-            # Add exact match condition
-            similar_users_query["$or"].append(
-                {"preferences.preferred_tags": {"$in": preferred_tags}}
-            )
-            
-            # Add partial match conditions for each tag
-            for tag in preferred_tags:
-                if tag and len(tag) > 3:  # Only use meaningful tags
-                    # Find users with tags that contain this tag as a substring
-                    similar_users_query["$or"].append(
-                        {"preferences.preferred_tags": {"$regex": tag, "$options": "i"}}
-                    )
-        
-        # If we have no query conditions, use a reasonable default
-        if not similar_users_query["$or"]:
-            similar_users = list(users_collection.find({"_id": {"$ne": user_id}}).limit(50))
-        else:
-            similar_users = list(users_collection.find(similar_users_query).limit(100))  # Increased limit for broader matches
-
+        # Find similar users with caching optimization
+        similar_users = find_similar_users(user_id)
         logger.info(f"Found {len(similar_users)} similar users for user {user_id}")
+        
+        if not similar_users:
+            return []
+        
+        # Get similar user IDs and create similarity map
+        similar_user_ids = [u["user_id"] for u in similar_users]
+        similarity_map = {u["user_id"]: u["similarity"] for u in similar_users}
 
         # Define weights for different interaction types
         action_weights = {
@@ -1226,43 +1194,21 @@ def get_collaborative_recommendations(user_id):
             "comment": 3,
             "view": 2,
             "click": 1,
-            "dislike": -5
+            "dislike": -5,
+            "viewed": 2,
+            "liked": 5,
+            "visited": 4,
+            "reviewed": 3
         }
 
-        # Get current time consistently as timezone-naive
-        current_date = datetime.now().replace(tzinfo=None).date()
-
-        # Time decay factor for older interactions
-        def apply_time_decay(weight, interaction_time):
-            # Parse the timestamp string if needed
-            if isinstance(interaction_time, str):
-                try:
-                    # Try to parse string timestamp and remove timezone
-                    timestamp = interaction_time.split("T")[0]  # Take just the date part
-                    interaction_time = datetime.strptime(timestamp, "%Y-%m-%d").date()
-                except Exception as e:
-                    # If parsing fails, use current date
-                    interaction_time = current_date
-            # If it's already a datetime, convert to date
-            elif hasattr(interaction_time, 'date'):
-                try:
-                    interaction_time = interaction_time.replace(tzinfo=None).date()
-                except:
-                    interaction_time = current_date
-            else:
-                # Fallback to current date
-                interaction_time = current_date
-
-            # Calculate days between dates
-            days_ago = max(0, (current_date - interaction_time).days)
-            decay = math.exp(-days_ago / 30)  # Exponential decay over 30 days
-            return weight * decay
-
-        # Calculate similarity scores for each user
-        user_similarities = {}
-        for similar_user in similar_users:
-            similarity = calculate_similarity_score(user, similar_user)
-            user_similarities[similar_user["_id"]] = similarity
+        # Get current time consistently
+        current_time = datetime.now()
+        
+        # Query interactions efficiently with a single query
+        similar_interactions = list(interactions_collection.find({
+            "user_id": {"$in": similar_user_ids},
+            "place_id": {"$nin": excluded_place_ids}
+        }))
 
         # Track recommended places with scores
         place_scores = {}
@@ -1274,51 +1220,70 @@ def get_collaborative_recommendations(user_id):
                 user_interactions[i["place_id"]] = i["interaction_type"]
 
         # Process interactions from similar users
-        for similar_user in similar_users:
-            interactions = list(interactions_collection.find({"user_id": similar_user["_id"]}).limit(100))
+        for interaction in similar_interactions:
+            # Skip if place_id or interaction_type is missing
+            if "place_id" not in interaction or "interaction_type" not in interaction:
+                continue
+
+            place_id = interaction["place_id"]
+            similar_user_id = interaction["user_id"]
+            action = interaction["interaction_type"]
             
-            # Get similarity score for this user
-            similarity = user_similarities.get(similar_user["_id"], 0.5)  # Default 0.5 if missing
+            # Get user similarity score
+            user_similarity = similarity_map.get(similar_user_id, 0.5)  # Default 0.5 if missing
+            
+            # Skip low similarity users
+            if user_similarity < 0.3:
+                continue
 
-            for interaction in interactions:
-                # Skip if place_id or interaction_type is missing
-                if "place_id" not in interaction or "interaction_type" not in interaction:
-                    continue
+            # Skip if user already dislikes this place
+            if place_id in user_interactions and user_interactions[place_id] == "dislike":
+                continue
 
-                place_id = interaction["place_id"]
-                action = interaction["interaction_type"]
+            # Calculate time decay
+            interaction_time = interaction.get("timestamp", current_time)
+            if isinstance(interaction_time, str):
+                try:
+                    interaction_time = datetime.fromisoformat(interaction_time.replace('Z', '+00:00'))
+                except:
+                    interaction_time = current_time
+                    
+            days_ago = max(1, (current_time - interaction_time).days)
+            time_decay = 1.0 / (1 + math.log(days_ago))
+            
+            # Get action weight
+            weight = action_weights.get(action, 1)  # Default weight of 1 for unknown actions
+            
+            # Calculate final score
+            final_score = weight * time_decay * user_similarity
 
-                # Get timestamp with fallback to current date
-                timestamp = interaction.get("timestamp", current_date)
-
-                # Skip if user already dislikes this place
-                if place_id in user_interactions and user_interactions[place_id] == "dislike":
-                    continue
-
-                weight = action_weights.get(action, 1)  # Default weight of 1 for unknown actions
-                
-                # Apply time decay
-                time_decayed_score = apply_time_decay(weight, timestamp)
-                
-                # Apply user similarity as a multiplier
-                final_score = time_decayed_score * similarity
-
-                # Only add positively scored places
-                if final_score > 0:
-                    if place_id not in place_scores:
-                        place_scores[place_id] = 0
-                    place_scores[place_id] += final_score
+            # Only add positively scored places
+            if final_score > 0:
+                if place_id not in place_scores:
+                    place_scores[place_id] = 0
+                place_scores[place_id] += final_score
 
         # Sort places by score
         sorted_places = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)
-        recommended_place_ids = [place_id for place_id, _ in sorted_places]
-
-        logger.info(f"Found {len(recommended_place_ids)} collaborative recommendations for user {user_id}")
-        return recommended_place_ids
+        top_place_ids = [place_id for place_id, _ in sorted_places[:target_count*2]]
+        
+        if not top_place_ids:
+            return []
+            
+        # Get place documents
+        recommended_places = list(places_collection.find({"_id": {"$in": top_place_ids}}))
+        
+        # Sort by original weight
+        place_weights = {place_id: weight for place_id, weight in sorted_places}
+        recommended_places.sort(key=lambda x: place_weights.get(x["_id"], 0), reverse=True)
+        
+        logger.info(f"Found {len(recommended_places)} collaborative recommendations for user {user_id}")
+        
+        return recommended_places[:target_count]
+        
     except Exception as e:
         logger.error(f"Error in collaborative filtering: {str(e)}")
         return []
-
 def calculate_similarity_score(user1, user2):
     """
     Calculate similarity between two users based on their preferences.

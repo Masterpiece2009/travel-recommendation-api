@@ -1201,8 +1201,8 @@ def get_collaborative_recommendations(user_id, target_count=10, excluded_place_i
             "reviewed": 3
         }
 
-        # Get current time consistently
-        current_time = datetime.now()
+        # Get current time consistently - ensure it's timezone-naive
+        current_time = datetime.now().replace(tzinfo=None)
         
         # Query interactions efficiently with a single query
         similar_interactions = list(interactions_collection.find({
@@ -1240,16 +1240,32 @@ def get_collaborative_recommendations(user_id, target_count=10, excluded_place_i
             if place_id in user_interactions and user_interactions[place_id] == "dislike":
                 continue
 
-            # Calculate time decay
-            interaction_time = interaction.get("timestamp", current_time)
-            if isinstance(interaction_time, str):
-                try:
-                    interaction_time = datetime.fromisoformat(interaction_time.replace('Z', '+00:00'))
-                except:
-                    interaction_time = current_time
-                    
-            days_ago = max(1, (current_time - interaction_time).days)
-            time_decay = 1.0 / (1 + math.log(days_ago))
+            # Calculate time decay - handle datetime timezone issues
+            try:
+                interaction_time = interaction.get("timestamp", current_time)
+                
+                # Convert string timestamps to datetime
+                if isinstance(interaction_time, str):
+                    try:
+                        # Parse to datetime and explicitly remove timezone info
+                        interaction_time = datetime.fromisoformat(interaction_time.replace('Z', '')).replace(tzinfo=None)
+                    except:
+                        # If parsing fails, use current time
+                        interaction_time = current_time
+                
+                # Ensure any datetime is timezone-naive
+                if hasattr(interaction_time, 'tzinfo') and interaction_time.tzinfo is not None:
+                    interaction_time = interaction_time.replace(tzinfo=None)
+                
+                # Calculate days difference
+                time_diff = current_time - interaction_time
+                days_ago = max(1, time_diff.days)
+                time_decay = 1.0 / (1 + math.log(days_ago))
+                
+            except Exception as time_error:
+                # If any time calculation fails, use default decay
+                logger.warning(f"Time decay calculation error: {time_error}, using default")
+                time_decay = 0.5
             
             # Get action weight
             weight = action_weights.get(action, 1)  # Default weight of 1 for unknown actions

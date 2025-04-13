@@ -1162,7 +1162,7 @@ def get_collaborative_recommendations(user_id, target_count=10, excluded_place_i
         excluded_place_ids: Place IDs to exclude
         
     Returns:
-        List of recommended places through collaborative filtering
+        List of place IDs recommended through collaborative filtering
     """
     try:
         logger.info(f"Finding collaborative recommendations for user {user_id}")
@@ -1286,16 +1286,19 @@ def get_collaborative_recommendations(user_id, target_count=10, excluded_place_i
         if not top_place_ids:
             return []
             
+        # Remove the following section that gets place documents:
         # Get place documents
-        recommended_places = list(places_collection.find({"_id": {"$in": top_place_ids}}))
+        # recommended_places = list(places_collection.find({"_id": {"$in": top_place_ids}}))
         
         # Sort by original weight
-        place_weights = {place_id: weight for place_id, weight in sorted_places}
-        recommended_places.sort(key=lambda x: place_weights.get(x["_id"], 0), reverse=True)
+        # place_weights = {place_id: weight for place_id, weight in sorted_places}
+        # recommended_places.sort(key=lambda x: place_weights.get(x["_id"], 0), reverse=True)
         
-        logger.info(f"Found {len(recommended_places)} collaborative recommendations for user {user_id}")
+        # Log the number of recommendations found
+        logger.info(f"Found {len(top_place_ids[:target_count])} collaborative recommendations for user {user_id}")
         
-        return recommended_places[:target_count]
+        # Return just the place IDs to match the expected format in generate_final_recommendations
+        return top_place_ids[:target_count]
         
     except Exception as e:
         logger.error(f"Error in collaborative filtering: {str(e)}")

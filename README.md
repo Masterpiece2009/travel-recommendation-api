@@ -1,137 +1,137 @@
-<h1 align="center" style="font-size:3em;font-weight:900;">🌍 <b>Explore - Travel Recommendation API</b> 🌍</h1>
-📌 Overview
-Explore is a sophisticated travel recommendation system that delivers personalized travel suggestions and dynamic itineraries. It integrates collaborative filtering, content-based filtering, semantic search, and discovery mechanisms to ensure high-quality and diverse travel experiences.
+🌍 EXPLORE - TRAVEL RECOMMENDATION API
+======================================
 
-Fallback strategies, intelligent caching, and progressive pagination guarantee performance, reliability, and personalization even under edge cases.
+A sophisticated travel recommendation system that delivers personalized travel suggestions and dynamic itineraries. It combines collaborative filtering, content-based filtering, semantic search, and discovery mechanisms to ensure high-quality and diverse travel experiences. Built with robust fallback strategies, intelligent caching, and efficient pagination to maximize user satisfaction.
 
-⚙️ Core Features
-🧠 Multi-Strategy Recommendation Engine
-Collaborative Filtering (40%) – Based on behavior of similar users.
+--------------------------------------
+⚙️ SYSTEM OVERVIEW
+--------------------------------------
 
-Content-Based Filtering (60%) – Based on user’s own historical preferences.
+**Explore** provides advanced, personalized travel recommendations using:
 
-Category Matching (60%) – Matches based on preferred categories/tags.
+- **Collaborative Filtering** (40%): Based on interactions of similar users.
+- **Content-Based Filtering** (60%): Based on a user's own preferences.
+- **Category Matching** (60%): Matches locations with tags and categories.
+- **Semantic Search** (40%): Uses NLP to recommend semantically relevant places.
+- **Discovery Mechanisms**: Prevents recommendation bubbles by suggesting diverse and fresh places.
 
-Semantic Search (40%) – NLP-based semantic matching to user interests.
+--------------------------------------
+🚀 CORE FEATURES
+--------------------------------------
 
-Discovery Mechanism – Ensures recommendations remain fresh and diverse.
+**Multi-Strategy Recommendation Engine**
+- Combines multiple filters and weights for high-accuracy suggestions.
 
-🚀 Advanced Caching System
-Two-Level NLP Caching – Reduces NLP response time from 12s.
+**Advanced Caching System**
+- Two-Level NLP Caching: Reduces response time from 12s.
+- TTL-based Expiry: Keeps data fresh (6-hour TTL).
+- Stores 7 cached recommendations per user.
+- Background generation with lock mechanisms.
 
-TTL-based Expiration – Keeps content fresh (6-hour TTL).
+**Progressive Pagination**
+- 1st request: 10 new places.
+- 2nd request: 10 new + 10 previous (20 total).
+- 3rd+ request: 10 new + 20 previous (30 total).
 
-User-specific Cache – Stores 7 recommendation responses per user.
+--------------------------------------
+🗺️ PERSONALIZED ROADMAP GENERATION
+--------------------------------------
 
-Locking Mechanisms – For safe background generation.
+**Critical Filters (Hard Constraints)**
+- Location-Based Filtering.
+- Accessibility Requirements.
 
-📖 Progressive Pagination
-1st Request: 10 new places
+**Soft Constraint Scoring**
+- Budget Compatibility: 30%
+- Accessibility Features: 20%
+- Group Type Suitability (Family, Solo, Couples): 30%
+- Seasonal Relevance: 20%
 
-2nd Request: 10 new + 10 previous (20 total)
+**Intelligent Caching**
+- Roadmaps regenerate only when preferences change.
+- Uses preference hash to detect changes.
 
-3rd+ Request: 10 new + 20 previous (30 total)
+--------------------------------------
+🧩 KEY FUNCTIONS
+--------------------------------------
 
-🗺️ Personalized Roadmap Generation
-✅ Critical Filters (Hard Constraints)
-Location Filtering – Based on preferred regions.
+**Recommendation Generation**
+- `get_candidate_places()`: Fetch candidate places matching preferences.
+- `generate_final_recommendations()`: Combines all filters and fallbacks.
+- `get_collaborative_recommendations()`: Uses similar users' history.
 
-Accessibility Compatibility – Filters places based on user needs.
+**Roadmap Generation**
+- `generate_hybrid_roadmap()`: Generates itinerary with fallback support.
+- `get_roadmap_with_caching()`: Fetches or regenerates roadmaps intelligently.
 
-🎯 Soft Constraint Scoring
-Budget Compatibility (30%)
+**Helper Functions**
+- `load_spacy_model()`: Loads word vectors for NLP.
+- `compute_text_similarity()`: Compares semantic similarity.
+- `check_accessibility_compatibility()`: Validates accessibility.
+- `calculate_budget_compatibility()`: Budget relevance score.
 
-Accessibility Features (20%)
+--------------------------------------
+🔁 SYSTEM FLOW
+--------------------------------------
 
-Group Type Suitability (30%) – Family, solo, couples, etc.
+**Recommendation Flow**
+User Request  
+→ Check Cache  
+ ├── Collaborative Recommendations (40%)  
+ └── Content-Based Recommendations (60%)
 
-Seasonal Relevance (20%)
+**Roadmap Generation Flow**
+User Request  
+→ Generate Hybrid Roadmap  
+ ├── Critical Filters → Accessibility + Destination  
+ ├── Weighted Scoring → Budget + Group + Season  
+ └── Fallbacks → Nearby → Trending → Top-Rated
 
-🧠 Intelligent Caching
-Roadmaps only regenerate when user preferences change
+--------------------------------------
+✅ RECENT OPTIMIZATIONS
+--------------------------------------
 
-Preference hash ensures efficient cache validation
+- Modified collaborative recommendations to return place IDs.
+- Implemented two-level NLP caching to reduce processing load.
+- Enhanced similar users caching (12-hour expiration).
+- Improved timezone comparison for datetimes.
+- Implemented lazy-loading to minimize DB queries.
 
-🧩 Key Functions
-🔁 Recommendation Generation
-get_candidate_places() – Filters initial candidate places.
+--------------------------------------
+🗃️ DATABASE COLLECTIONS & TTL
+--------------------------------------
 
-generate_final_recommendations() – Combines all strategies + fallbacks.
+**Core Collections (Permanent):**
+- `users`
+- `places`
+- `interactions`
 
-get_collaborative_recommendations() – User-similarity based suggestions.
+**Cache Collections (With TTL):**
+- `recommendations_cache`: 6h TTL
+- `roadmaps`: 24h TTL
+- `cache_locks`: 10m TTL
+- `shown_places`: 6h TTL
+- `user_keywords_cache`: 24h TTL
+- `similar_users_cache`: 12h TTL
 
-📍 Roadmap Generation
-generate_hybrid_roadmap() – Produces full itinerary using fallback paths.
+--------------------------------------
+📁 PROJECT STRUCTURE
+--------------------------------------
 
-get_roadmap_with_caching() – Returns cached or fresh roadmap.
+main.py              → Full-feature API  
+main_fixed.py        → Deployment version  
+requirements.txt     → Dependencies (spaCy, geopy, etc.)  
+runtime.txt          → Python version (3.10)  
+README.md            → Documentation
 
-🔧 Helper Utilities
-load_spacy_model() – Loads NLP model with word vectors.
+--------------------------------------
+🚀 FUTURE ENHANCEMENTS
+--------------------------------------
 
-compute_text_similarity() – Measures text-based relevance.
+- Tensor Factorization for better collaborative filtering.
+- Real-time Interaction Processing via WebSockets.
+- Natural Language Query Processing for recommendations.
+- User Clustering for improved user similarity.
 
-check_accessibility_compatibility() – Verifies accessibility compliance.
-
-calculate_budget_compatibility() – Budget scoring for suggestions.
-
-🔄 System Flow
-🧭 Recommendation Flow
-scss
-Copy
-Edit
-User Request
-  └─> Check Cache
-       ├── Collaborative Recommendations (40%)
-       └── Content-Based Recommendations (60%)
-🗺️ Roadmap Generation Flow
-pgsql
-Copy
-Edit
-User Request
-  └─> Generate Hybrid Roadmap
-       ├── Critical Filters → Location + Accessibility
-       ├── Soft Scoring → Budget + Group Type + Season
-       └── Fallbacks → Nearby → Trending → Top-Rated
-🔧 Recent Optimizations
-✅ Collaborative filtering returns place IDs for better performance
-✅ Two-level NLP caching implemented
-✅ Similar users caching (12h expiration)
-✅ Timezone-aware datetime comparison
-✅ Lazy-loading added to reduce DB queries
-
-🗃️ Database Collections
-📦 Core Collections (Permanent):
-users
-
-places
-
-interactions
-
-🧊 Cache Collections (With TTL):
-Collection	TTL
-recommendations_cache	6 hours
-roadmaps	24 hours
-cache_locks	10 minutes
-shown_places	6 hours
-user_keywords_cache	24 hours
-similar_users_cache	12 hours
-🗂️ Project Structure
-bash
-Copy
-Edit
-├── main.py             # Main app with full feature set
-├── main_fixed.py       # Lightweight version for deployment
-├── requirements.txt    # Dependencies (e.g. spaCy, geopy)
-├── runtime.txt         # Python version (3.10)
-└── README.md           # Project documentation
-🌟 Future Enhancements
-🚀 Tensor factorization for better collaborative filtering
-
-🔌 Real-time interactions via WebSockets
-
-🗣️ Natural language queries for recommendations
-
-👥 User clustering for similarity detection
-
-✨ Built to make discovering new travel destinations smarter, faster, and more personal.
-
+--------------------------------------
+🌟 BUILT TO MAKE DISCOVERING NEW DESTINATIONS SMARTER, FASTER, AND MORE PERSONAL 🌟

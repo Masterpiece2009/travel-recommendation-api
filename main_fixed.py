@@ -1348,7 +1348,7 @@ def calculate_similarity_score(user1, user2):
         logger.error(f"Error calculating user similarity: {str(e)}")
         return 0.3  # Default modest similarity on error
 
-def find_similar_users(user_id, min_similarity=0.4, max_users=40):
+def find_similar_users(user_id, min_similarity=0.25, max_users=40):
     """
     Find users similar to the given user based on preferences and interactions,
     with caching for improved performance.

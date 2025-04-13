@@ -118,7 +118,6 @@ User Request
 📁 PROJECT STRUCTURE
 --------------------------------------
 
-main.py              → Full-feature API  
 main_fixed.py        → Deployment version  
 requirements.txt     → Dependencies (spaCy, geopy, etc.)  
 runtime.txt          → Python version (3.10)  

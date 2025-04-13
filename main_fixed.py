@@ -516,6 +516,7 @@ def find_similar_terms(word, limit=3):
 def find_places_by_keyword_similarity(keywords, excluded_place_ids=None, limit=20, fallback_level=0):
     """
     Find places similar to the given keywords using NLP, with similarity caching.
+    Supports non-English keywords by translating to English first.
     
     Args:
         keywords: List of keywords to match
@@ -530,6 +531,22 @@ def find_places_by_keyword_similarity(keywords, excluded_place_ids=None, limit=2
         return []
         
     excluded_place_ids = excluded_place_ids or []
+    
+    # Translate non-English keywords
+    translated_keywords = []
+    original_keywords = keywords.copy()
+    
+    for keyword in keywords:
+        detected_language = detect_language(keyword)
+        if detected_language != 'en':
+            translated = translate_to_english(keyword)
+            logger.debug(f"Translated keyword '{keyword}' ({detected_language}) to '{translated}'")
+            translated_keywords.append(translated)
+        else:
+            translated_keywords.append(keyword)
+    
+    # Use translated keywords for search and caching
+    keywords = translated_keywords
     cache_key = "_".join(sorted(keywords))
     
     try:
@@ -594,6 +611,7 @@ def find_places_by_keyword_similarity(keywords, excluded_place_ids=None, limit=2
                 {"$set": {
                     "cache_key": cache_key,
                     "keywords": keywords,
+                    "original_keywords": original_keywords,
                     "place_ids": place_ids,
                     "fallback_level": fallback_level,
                     "timestamp": datetime.now()

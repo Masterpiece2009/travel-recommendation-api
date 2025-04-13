@@ -1285,10 +1285,6 @@ def get_collaborative_recommendations(user_id, target_count=10, excluded_place_i
         logger.error(f"Error in collaborative filtering: {str(e)}")
         return []
 def calculate_similarity_score(user1, user2):
-    """
-    Calculate similarity between two users based on their preferences.
-    Returns a score between 0 and 1.
-    """
     try:
         # Get preferences
         prefs1 = user1.get("preferences", {})
@@ -1301,8 +1297,9 @@ def calculate_similarity_score(user1, user2):
         factors_count = 0
         
         # 1. Category similarity (weighted 40%)
-        cats1 = set(prefs1.get("preferred_categories", []))
-        cats2 = set(prefs2.get("preferred_categories", []))
+        # Changed to look for "categories" instead of "preferred_categories"
+        cats1 = set(prefs1.get("categories", []))
+        cats2 = set(prefs2.get("categories", []))
         
         if cats1 and cats2:
             # Jaccard similarity for categories
@@ -1311,8 +1308,9 @@ def calculate_similarity_score(user1, user2):
             factors_count += 1
         
         # 2. Tag similarity (weighted 40%)
-        tags1 = set(prefs1.get("preferred_tags", []))
-        tags2 = set(prefs2.get("preferred_tags", []))
+        # Changed to look for "tags" instead of "preferred_tags"
+        tags1 = set(prefs1.get("tags", []))
+        tags2 = set(prefs2.get("tags", []))
         
         if tags1 and tags2:
             # Jaccard similarity for tags
@@ -1320,8 +1318,8 @@ def calculate_similarity_score(user1, user2):
             similarity_score += tag_jaccard * 0.4
             factors_count += 1
         
-        # 3. Activity level similarity (weighted 20%)
-        # This is a proxy for user engagement patterns
+        # 3. Activity level similarity (weighted 20%) 
+        # Using a default value since this might not exist in your data
         activity1 = prefs1.get("activity_level", "medium")
         activity2 = prefs2.get("activity_level", "medium")
         
@@ -1335,6 +1333,9 @@ def calculate_similarity_score(user1, user2):
             
         similarity_score += activity_score * 0.2
         factors_count += 1
+        
+        # Add debug logging to see the calculated similarity
+        logger.info(f"Similarity between users: cats1={cats1}, cats2={cats2}, tags1={tags1}, tags2={tags2}, score={similarity_score}")
         
         # Normalize if we have factors
         final_score = similarity_score / factors_count if factors_count > 0 else 0.3
@@ -1369,17 +1370,16 @@ def find_similar_users(user_id, min_similarity=0.25, max_users=40):
             logger.info(f"Using cached similar users for {user_id}")
             return cached_similar["similar_users"]
         
-        # Get user document
-        user_doc = users_collection.find_one({"_id": user_id})
-        if not user_doc:
-            logger.warning(f"User {user_id} not found when finding similar users")
-            return []
-            
-        # Get user preferences
-        user_categories = set(user_doc.get("categories", []))
-        user_tags = set(user_doc.get("tags", []))
-        user_destinations = set(user_doc.get("destinations", []))
-        user_activity_level = user_doc.get("activity_level", 3)
+# Get user document
+user_doc = users_collection.find_one({"_id": user_id})
+if not user_doc:
+    logger.warning(f"User {user_id} not found when finding similar users")
+    return []
+    
+# Get user preferences from the correct location
+user_prefs = user_doc.get("preferences", {})
+user_categories = set(user_prefs.get("categories", []))
+user_tags = set(user_prefs.get("tags", []))
         
         # Get all other users
         all_users = list(users_collection.find({"_id": {"$ne": user_id}}))

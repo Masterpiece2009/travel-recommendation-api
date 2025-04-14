@@ -4293,7 +4293,6 @@ async def clear_search_history(user_id: str):
         )
 
 # --- Roadmap API Endpoints ---
-
 @app.get("/roadmap/{user_id}")
 async def get_roadmap(user_id: str, language: str = None):
     """
@@ -4314,7 +4313,7 @@ async def get_roadmap(user_id: str, language: str = None):
         # Translate if language parameter is provided
         if language:
             logger.info(f"Translating roadmap to {language}")
-            simplified_list = await translate_roadmap_results(simplified_list, language)
+            simplified_list = translate_roadmap_results(simplified_list, language)
         
         return {
             "success": True, 

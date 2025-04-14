@@ -4284,11 +4284,12 @@ async def clear_search_history(user_id: str):
 # --- Roadmap API Endpoints ---
 
 @app.get("/roadmap/{user_id}")
-async def get_roadmap(user_id: str):
+async def get_roadmap(user_id: str, language: str = None):
     """
     Get a travel roadmap for a specific user
     
     Uses caching: Only regenerates if user's travel preferences have changed
+    Optional language parameter for translation
     """
     try:
         logger.info(f"Roadmap request for user {user_id}")
@@ -4298,6 +4299,11 @@ async def get_roadmap(user_id: str):
         
         # Simplify to list format
         simplified_list = simplify_roadmap_to_list(roadmap_data)
+        
+        # Translate if language parameter is provided
+        if language:
+            logger.info(f"Translating roadmap to {language}")
+            simplified_list = await translate_roadmap_results(simplified_list, language)
         
         return {
             "success": True, 
@@ -4317,7 +4323,6 @@ async def get_roadmap(user_id: str):
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
 @app.post("/roadmap")
 async def create_roadmap(request: RoadmapRequest):
     """

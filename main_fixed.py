@@ -157,9 +157,16 @@ def translate_to_english(text):
     except Exception as e:
         logger.warning(f"Translation failed: {e}")
         return text  # Return original if translation fails
-async def translate_roadmap_results(roadmap_list, target_language):
+def translate_roadmap_results(roadmap_list, target_language):
     """
     Translate roadmap results to the target language
+    
+    Parameters:
+    - roadmap_list: List of roadmap items to translate
+    - target_language: Target language code (e.g., 'ar' for Arabic)
+    
+    Returns:
+    - Translated roadmap list
     """
     try:
         logger.info(f"Translating roadmap results to {target_language}")
@@ -172,47 +179,58 @@ async def translate_roadmap_results(roadmap_list, target_language):
             # Translate place details
             if "place" in translated_item:
                 place = translated_item["place"]
-                if "name" in place:
-                    # Use await correctly with the translate function
-                    place["name"] = await translate_from_english(place["name"], target_language)
-                if "description" in place:
-                    place["description"] = await translate_from_english(place["description"], target_language)
-                if "location" in place and "city" in place["location"]:
-                    place["location"]["city"] = await translate_from_english(place["location"]["city"], target_language)
-                if "location" in place and "country" in place["location"]:
-                    place["location"]["country"] = await translate_from_english(place["location"]["country"], target_language)
+                if "name" in place and isinstance(place["name"], str):
+                    place["name"] = translate_from_english(place["name"], target_language)
+                    
+                if "description" in place and isinstance(place["description"], str):
+                    place["description"] = translate_from_english(place["description"], target_language)
+                    
+                if "location" in place and "city" in place["location"] and isinstance(place["location"]["city"], str):
+                    place["location"]["city"] = translate_from_english(place["location"]["city"], target_language)
+                    
+                if "location" in place and "country" in place["location"] and isinstance(place["location"]["country"], str):
+                    place["location"]["country"] = translate_from_english(place["location"]["country"], target_language)
                 
                 # Translate tags if they're human-readable (not machine codes)
                 if "tags" in place and isinstance(place["tags"], list):
                     translated_tags = []
                     for tag in place["tags"]:
-                        translated_tag = await translate_from_english(tag, target_language)
-                        translated_tags.append(translated_tag)
+                        if isinstance(tag, str):
+                            translated_tag = translate_from_english(tag, target_language)
+                            translated_tags.append(translated_tag)
+                        else:
+                            translated_tags.append(tag)
                     place["tags"] = translated_tags
                 
                 # Translate category if it's a human-readable string
-                if "category" in place:
-                    place["category"] = await translate_from_english(place["category"], target_language)
+                if "category" in place and isinstance(place["category"], str):
+                    place["category"] = translate_from_english(place["category"], target_language)
                 
                 # Translate accessibility features
                 if "accessibility" in place and isinstance(place["accessibility"], list):
                     translated_accessibility = []
                     for feature in place["accessibility"]:
-                        translated_feature = await translate_from_english(feature, target_language)
-                        translated_accessibility.append(translated_feature)
+                        if isinstance(feature, str):
+                            translated_feature = translate_from_english(feature, target_language)
+                            translated_accessibility.append(translated_feature)
+                        else:
+                            translated_accessibility.append(feature)
                     place["accessibility"] = translated_accessibility
                 
                 # Translate appropriate_time months if present
                 if "appropriate_time" in place and isinstance(place["appropriate_time"], list):
                     translated_months = []
                     for month in place["appropriate_time"]:
-                        translated_month = await translate_from_english(month, target_language)
-                        translated_months.append(translated_month)
+                        if isinstance(month, str):
+                            translated_month = translate_from_english(month, target_language)
+                            translated_months.append(translated_month)
+                        else:
+                            translated_months.append(month)
                     place["appropriate_time"] = translated_months
             
             # Translate next destination
-            if "next_destination" in translated_item:
-                translated_item["next_destination"] = await translate_from_english(translated_item["next_destination"], target_language)
+            if "next_destination" in translated_item and isinstance(translated_item["next_destination"], str):
+                translated_item["next_destination"] = translate_from_english(translated_item["next_destination"], target_language)
             
             translated_results.append(translated_item)
         

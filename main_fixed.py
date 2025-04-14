@@ -53,6 +53,57 @@ def detect_language(text):
     except Exception as e:
         logger.warning(f"Language detection failed: {e}")
         return "en"  # Default to English if detection fails
+
+def translate_from_english(text, target_lang):
+    """
+    Translate text from English to target language.
+    
+    Args:
+        text: English text to translate
+        target_lang: Target language code
+        
+    Returns:
+        Translated text or original if translation fails
+    """
+    try:
+        if not text or len(text.strip()) == 0 or target_lang == 'en' or target_lang == 'und':
+            return text
+            
+        from deep_translator import GoogleTranslator
+        import hashlib
+        from datetime import datetime
+        
+        # Create a consistent hash for cache key
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        cache_key = f"translate_from_en_{target_lang}_{text_hash}"
+        
+        # Check if we have translation in cache
+        cache_result = translation_cache.find_one({"key": cache_key})
+        
+        if cache_result:
+            logger.info(f"Using cached translation to {target_lang}")
+            return cache_result["translated_text"]
+            
+        # Translate using Google translator
+        translated = GoogleTranslator(source='en', target=target_lang).translate(text)
+        logger.info(f"Translated text from English to {target_lang}")
+        
+        # Cache the translation result
+        translation_cache.insert_one({
+            "key": cache_key,
+            "original_text": text,
+            "translated_text": translated,
+            "source_lang": 'en',
+            "target_lang": target_lang,
+            "timestamp": datetime.now()
+        })
+        
+        return translated
+    except Exception as e:
+        logger.warning(f"Translation from English to {target_lang} failed: {e}")
+        return text  # Return original if translation fails
+
+
 def translate_to_english(text):
     """
     Translate non-English text to English.

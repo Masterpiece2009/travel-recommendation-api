@@ -160,13 +160,6 @@ def translate_to_english(text):
 async def translate_roadmap_results(roadmap_list, target_language):
     """
     Translate roadmap results to the target language
-    
-    Parameters:
-    - roadmap_list: List of roadmap items to translate
-    - target_language: Target language code (e.g., 'ar' for Arabic)
-    
-    Returns:
-    - Translated roadmap list
     """
     try:
         logger.info(f"Translating roadmap results to {target_language}")
@@ -180,6 +173,7 @@ async def translate_roadmap_results(roadmap_list, target_language):
             if "place" in translated_item:
                 place = translated_item["place"]
                 if "name" in place:
+                    # Use await correctly with the translate function
                     place["name"] = await translate_from_english(place["name"], target_language)
                 if "description" in place:
                     place["description"] = await translate_from_english(place["description"], target_language)
@@ -227,7 +221,6 @@ async def translate_roadmap_results(roadmap_list, target_language):
     except Exception as e:
         logger.error(f"Error translating roadmap results: {str(e)}")
         return roadmap_list  # Return original if translation fails
-
 
 # Define DummyNLP in global scope for fallback
 class DummyNLP:

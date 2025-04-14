@@ -17,6 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sklearn.preprocessing import MinMaxScaler
 from geopy.distance import geodesic
+import re
+import hashlib
+from langdetect import detect
+from deep_translator import GoogleTranslator
 def detect_language(text):
     """
     Detect the language of a text string with improved Arabic detection.

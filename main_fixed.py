@@ -19,7 +19,7 @@ from sklearn.preprocessing import MinMaxScaler
 from geopy.distance import geodesic
 def detect_language(text):
     """
-    Detect the language of a text string.
+    Detect the language of a text string with improved Arabic detection.
     
     Args:
         text: Text string to analyze
@@ -29,13 +29,30 @@ def detect_language(text):
     """
     try:
         from langdetect import detect
+        import re
+        
         if not text or len(text.strip()) == 0:
             return "en"
-        return detect(text)
+        
+        # Check for Arabic script characters
+        arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+')
+        if arabic_pattern.search(text):
+            # For short texts with Arabic characters, we'll default to Arabic
+            # This helps avoid the Persian misidentification issue
+            if len(text) < 20:
+                return "ar"
+        
+        # Use standard detection for longer texts
+        detected = detect(text)
+        
+        # Fix common misidentification between Persian and Arabic
+        if detected == "fa" and arabic_pattern.search(text):
+            return "ar"  # Override Persian detection for Arabic script
+            
+        return detected
     except Exception as e:
         logger.warning(f"Language detection failed: {e}")
         return "en"  # Default to English if detection fails
-        
 def translate_to_english(text):
     """
     Translate non-English text to English.

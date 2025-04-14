@@ -3866,22 +3866,28 @@ async def get_user_shown_places(user_id: str):
 async def search_places(
     user_id: str,
     query: str = Query(..., min_length=1),
-    limit: int = Query(10, ge=1, le=50)
+    limit: int = Query(10, ge=1, le=50),
+    translate_results: bool = Query(False, description="Whether to translate results back to the query language"),
+    language: Optional[str] = Query(None, description="Override detected language")
 ):
     """
-    Search for places based on a text query
+    Search for places based on a text query with language support
     
     Args:
         user_id: User ID (for tracking)
         query: Search query string
         limit: Maximum number of results to return
+        translate_results: Whether to translate results back to the query language
+        language: Override automatically detected language
     """
     try:
         # Store original query
         original_query = query
         
-        # Detect language and translate if needed
-        detected_language = detect_language(query)
+        # Use provided language or detect language
+        detected_language = language if language else detect_language(query)
+        
+        # Translate query to English if needed
         if detected_language != 'en':
             # Translate query to English for better matching
             translated_query = translate_to_english(query)
@@ -4017,6 +4023,36 @@ async def search_places(
         # Extract just the place data
         final_results = [item["place"] for item in sorted_results]
         
+        # Translate results back to original language if requested
+        if translate_results and detected_language not in ['en', 'und'] and len(final_results) > 0:
+            translated_results = []
+            
+            for place in final_results:
+                # Create a copy of the place to modify
+                translated_place = dict(place)
+                
+                # Translate key fields
+                if "name" in place:
+                    translated_place["name"] = translate_from_english(place["name"], detected_language)
+                    
+                if "description" in place:
+                    translated_place["description"] = translate_from_english(place["description"], detected_language)
+                    
+                if "category" in place:
+                    translated_place["category"] = translate_from_english(place["category"], detected_language)
+                    
+                # Translate tags if present
+                if "tags" in place and isinstance(place["tags"], list):
+                    translated_place["tags"] = [
+                        translate_from_english(tag, detected_language) 
+                        for tag in place["tags"]
+                    ]
+                
+                translated_results.append(translated_place)
+                
+            final_results = translated_results
+            logger.info(f"Translated {len(final_results)} results to {detected_language}")
+        
         # Include translation info in response
         return {
             "success": True,
@@ -4025,7 +4061,8 @@ async def search_places(
             "translated_query": query if detected_language != 'en' else None,
             "detected_language": detected_language,
             "count": len(final_results),
-            "results": final_results
+            "results": final_results,
+            "translated_results": translate_results and detected_language not in ['en', 'und']
         }
         
     except Exception as e:

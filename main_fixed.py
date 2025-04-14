@@ -21,6 +21,7 @@ import re
 import hashlib
 from langdetect import detect
 from deep_translator import GoogleTranslator
+import copy
 def detect_language(text):
     """
     Detect the language of a text string with improved Arabic detection.
@@ -156,6 +157,77 @@ def translate_to_english(text):
     except Exception as e:
         logger.warning(f"Translation failed: {e}")
         return text  # Return original if translation fails
+async def translate_roadmap_results(roadmap_list, target_language):
+    """
+    Translate roadmap results to the target language
+    
+    Parameters:
+    - roadmap_list: List of roadmap items to translate
+    - target_language: Target language code (e.g., 'ar' for Arabic)
+    
+    Returns:
+    - Translated roadmap list
+    """
+    try:
+        logger.info(f"Translating roadmap results to {target_language}")
+        translated_results = []
+        
+        for item in roadmap_list:
+            # Deep copy to avoid modifying the original
+            translated_item = copy.deepcopy(item)
+            
+            # Translate place details
+            if "place" in translated_item:
+                place = translated_item["place"]
+                if "name" in place:
+                    place["name"] = await translate_from_english(place["name"], target_language)
+                if "description" in place:
+                    place["description"] = await translate_from_english(place["description"], target_language)
+                if "location" in place and "city" in place["location"]:
+                    place["location"]["city"] = await translate_from_english(place["location"]["city"], target_language)
+                if "location" in place and "country" in place["location"]:
+                    place["location"]["country"] = await translate_from_english(place["location"]["country"], target_language)
+                
+                # Translate tags if they're human-readable (not machine codes)
+                if "tags" in place and isinstance(place["tags"], list):
+                    translated_tags = []
+                    for tag in place["tags"]:
+                        translated_tag = await translate_from_english(tag, target_language)
+                        translated_tags.append(translated_tag)
+                    place["tags"] = translated_tags
+                
+                # Translate category if it's a human-readable string
+                if "category" in place:
+                    place["category"] = await translate_from_english(place["category"], target_language)
+                
+                # Translate accessibility features
+                if "accessibility" in place and isinstance(place["accessibility"], list):
+                    translated_accessibility = []
+                    for feature in place["accessibility"]:
+                        translated_feature = await translate_from_english(feature, target_language)
+                        translated_accessibility.append(translated_feature)
+                    place["accessibility"] = translated_accessibility
+                
+                # Translate appropriate_time months if present
+                if "appropriate_time" in place and isinstance(place["appropriate_time"], list):
+                    translated_months = []
+                    for month in place["appropriate_time"]:
+                        translated_month = await translate_from_english(month, target_language)
+                        translated_months.append(translated_month)
+                    place["appropriate_time"] = translated_months
+            
+            # Translate next destination
+            if "next_destination" in translated_item:
+                translated_item["next_destination"] = await translate_from_english(translated_item["next_destination"], target_language)
+            
+            translated_results.append(translated_item)
+        
+        logger.info(f"Translated {len(translated_results)} results to {target_language}")
+        return translated_results
+    except Exception as e:
+        logger.error(f"Error translating roadmap results: {str(e)}")
+        return roadmap_list  # Return original if translation fails
+
 
 # Define DummyNLP in global scope for fallback
 class DummyNLP:

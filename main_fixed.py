@@ -5034,7 +5034,16 @@ async def server_exception_handler(request: Request, exc):
         status_code=500,
         content={"success": False, "error": "Internal server error"}
     )
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services at startup"""
+    try:
+        # Initialize Gemini API
+        initialize_gemini_api()
+    except Exception as e:
+        logger.error(f"Startup error: {str(e)}")
 
+        
 # --- Server Startup ---
 if __name__ == "__main__":
     import uvicorn

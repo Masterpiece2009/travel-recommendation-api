@@ -550,64 +550,54 @@ def translate_roadmap_results_with_gemini(roadmap_list, target_language):
                 all_fields.append(item["next_destination"])
                 field_mappings.append((item_idx, ["next_destination"]))
         
-        # Perform batch translation - handle event loop in a way that works in the existing context
-        try:
-            # Try to get the current event loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If the loop is already running, we need a different approach
-                # Use synchronous approach since we're in an event loop already
-                translated_fields = []
-                for field in all_fields:
-                    # Use cache check first
-                    text_hash = hashlib.md5(str(field).encode()).hexdigest()
-                    cache_key = f"gemini_translate_en_{target_language}_{text_hash}"
-                    cache_result = translation_cache.find_one({"key": cache_key})
-                    
-                    if cache_result:
-                        logger.info(f"Using cached Gemini translation to {target_language}")
-                        translated_fields.append(cache_result["translated_text"])
-                    else:
-                        # Fallback to standard translation if we can't use async
-                        translated_fields.append(translate_from_english(field, target_language))
-            else:
-                # If the loop is not running, we can use it directly
-                translated_fields = loop.run_until_complete(
-                    batch_translate_with_gemini(all_fields, "en", target_language)
-                )
-        except RuntimeError:
-            # Fallback if we have event loop issues
-            logger.warning("Event loop issue, using standard translation")
-            translated_fields = [translate_from_english(field, target_language) for field in all_fields]
+        # Use individual translations since we've had issues with event loops
+        translated_fields = [translate_from_english(field, target_language) for field in all_fields]
         
         # Update the original data with translations
         for idx, (item_idx, field_path) in enumerate(field_mappings):
+            if idx >= len(translated_fields):
+                continue
+                
+            # Get the item to modify
             item = translated_results[item_idx]
             
-            # Navigate to the correct nested object
-            target = item
-            for i in range(len(field_path) - 1):
-                path_part = field_path[i]
-                if isinstance(path_part, int):
-                    target = target[field_path[i-1]][path_part]
-                else:
-                    target = target[path_part]
-            
-            # Update the field
-            last_part = field_path[-1]
-            if isinstance(last_part, int):
-                parent_field = field_path[-2]
-                target[parent_field][last_part] = translated_fields[idx]
-            else:
-                target[last_part] = translated_fields[idx]
+            try:
+                # Handle different field path patterns
+                if field_path[0] == "place":
+                    if len(field_path) == 2:
+                        # Handle direct place properties (e.g., place.name)
+                        item["place"][field_path[1]] = translated_fields[idx]
+                    elif len(field_path) == 3:
+                        if field_path[1] == "tags" and isinstance(field_path[2], int):
+                            # Handle place.tags[index]
+                            if "tags" in item["place"] and len(item["place"]["tags"]) > field_path[2]:
+                                item["place"]["tags"][field_path[2]] = translated_fields[idx]
+                        elif field_path[1] == "accessibility" and isinstance(field_path[2], int):
+                            # Handle place.accessibility[index]
+                            if "accessibility" in item["place"] and len(item["place"]["accessibility"]) > field_path[2]:
+                                item["place"]["accessibility"][field_path[2]] = translated_fields[idx]
+                        elif field_path[1] == "appropriate_time" and isinstance(field_path[2], int):
+                            # Handle place.appropriate_time[index]
+                            if "appropriate_time" in item["place"] and len(item["place"]["appropriate_time"]) > field_path[2]:
+                                item["place"]["appropriate_time"][field_path[2]] = translated_fields[idx]
+                        elif field_path[1] == "location" and field_path[2] in ["city", "country"]:
+                            # Handle place.location.city or place.location.country
+                            if "location" in item["place"]:
+                                item["place"]["location"][field_path[2]] = translated_fields[idx]
+                elif field_path[0] == "next_destination":
+                    # Handle top-level next_destination field
+                    item["next_destination"] = translated_fields[idx]
+            except Exception as e:
+                logger.warning(f"Error updating translated field at path {field_path}: {str(e)}")
         
-        logger.info(f"Translated {len(all_fields)} fields in roadmap using Gemini")
+        logger.info(f"Translated {len(all_fields)} fields in roadmap using individual translations")
         return translated_results
         
     except Exception as e:
         logger.error(f"Error translating roadmap with Gemini: {str(e)}")
         # Fallback to standard translation
         return translate_roadmap_results(roadmap_list, target_language)
+
         
 # Define DummyNLP in global scope for fallback
 class DummyNLP:

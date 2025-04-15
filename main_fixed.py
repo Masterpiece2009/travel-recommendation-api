@@ -22,18 +22,9 @@ import hashlib
 from langdetect import detect
 from deep_translator import GoogleTranslator
 import copy
-import os
-import google.generativeai as genai
-from dotenv import load_dotenv
-import json
-import asyncio
-from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
-from typing import Dict, List, Optional
 def detect_language(text):
     """
     Detect the language of a text string with improved Arabic detection.
-    Uses Gemini for better accuracy with fallback to traditional methods.
     
     Args:
         text: Text string to analyze
@@ -42,12 +33,13 @@ def detect_language(text):
         Language code (e.g., 'en', 'ar')
     """
     try:
+        from langdetect import detect
         import re
         
         if not text or len(text.strip()) == 0:
             return "en"
         
-        # Check for Arabic script characters - fastest method first
+        # Check for Arabic script characters
         arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+')
         if arabic_pattern.search(text):
             # For short texts with Arabic characters, we'll default to Arabic
@@ -55,28 +47,7 @@ def detect_language(text):
             if len(text) < 20:
                 return "ar"
         
-        # Try Gemini for more accurate detection for complex or ambiguous cases
-        try:
-            # Only use Gemini for longer, more complex texts to save API calls
-            if len(text) > 15 and not re.match(r'^[a-zA-Z\s.,!?0-9]+$', text):
-                model = genai.GenerativeModel('gemini-pro')
-                prompt = f"""
-                Detect the language of this text. Respond with just the ISO 639-1 language code (e.g., 'en', 'ar', 'fr', 'es', etc.): 
-                
-                "{text}"
-                """
-                
-                response = model.generate_content(prompt)
-                if response.text:
-                    lang_code = response.text.strip().lower()
-                    # Validate the language code format
-                    if re.match(r'^[a-z]{2}(-[a-z]{2})?$', lang_code):
-                        return lang_code.split('-')[0]  # Return the primary language code
-        except Exception as e:
-            logger.warning(f"Gemini language detection failed: {e}")
-        
-        # Fallback to standard detection
-        from langdetect import detect
+        # Use standard detection for longer texts
         detected = detect(text)
         
         # Fix common misidentification between Persian and Arabic
@@ -87,23 +58,7 @@ def detect_language(text):
     except Exception as e:
         logger.warning(f"Language detection failed: {e}")
         return "en"  # Default to English if detection fails
-def get_language_name(language_code):
-    """Get the full language name from a language code"""
-    language_names = {
-        "en": "English",
-        "ar": "Arabic",
-        "fr": "French",
-        "es": "Spanish",
-        "de": "German",
-        "it": "Italian",
-        "pt": "Portuguese",
-        "ru": "Russian",
-        "zh": "Chinese",
-        "ja": "Japanese",
-        "ko": "Korean",
-        # Add more languages as needed
-    }
-    return language_names.get(language_code, language_code)
+
 def translate_from_english(text, target_lang):
     """
     Translate text from English to target language.
@@ -202,195 +157,6 @@ def translate_to_english(text):
     except Exception as e:
         logger.warning(f"Translation failed: {e}")
         return text  # Return original if translation fails
-
-# Add at module level
-gemini_disabled = False
-
-def translate_with_gemini(text, source_lang, target_lang):
-    """
-    Translate text using Google's Gemini API with permanent fallback after rate limit
-    
-    Args:
-        text: Text to translate
-        source_lang: Source language code
-        target_lang: Target language code
-        
-    Returns:
-        Translated text
-    """
-    global gemini_disabled
-    
-    # If Gemini has been disabled due to rate limit, go straight to standard translation
-    if gemini_disabled:
-        logger.info("Gemini was disabled due to rate limit, using standard translation")
-        if source_lang == "en":
-            return translate_from_english(text, target_lang)
-        else:
-            return translate_to_english(text, source_lang)
-    
-    if not text or not isinstance(text, str) or text.strip() == "":
-        return text
-        
-    # Check if we've already translated this text
-    text_hash = hashlib.md5(str(text).encode()).hexdigest()
-    cache_key = f"gemini_translate_{source_lang}_{target_lang}_{text_hash}"
-    cache_result = translation_cache.find_one({"key": cache_key})
-    
-    if cache_result:
-        logger.info(f"Using cached translation to {target_lang}")
-        return cache_result["translated_text"]
-    
-    try:
-        # Initialize the Gemini client
-        if not initialize_gemini_api():
-            raise Exception("Failed to initialize Gemini API")
-        
-        # Direct content generation approach
-        prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text without quotes: \"{text}\""
-        
-        # Use the model we know works
-        model_name = "models/gemini-1.5-flash-latest"
-        
-        try:
-            logger.info(f"Using translation model: {model_name}")
-            gen_model = genai.GenerativeModel(model_name)
-            response = gen_model.generate_content(prompt)
-            translated_text = response.text.strip()
-            logger.info(f"Successfully used model: {model_name}")
-            
-            # Remove quotes if they were added by the model
-            if translated_text.startswith('"') and translated_text.endswith('"'):
-                translated_text = translated_text[1:-1]
-            
-            # Cache the result
-            translation_cache.insert_one({
-                "key": cache_key,
-                "original_text": text,
-                "translated_text": translated_text,
-                "source_lang": source_lang,
-                "target_lang": target_lang,
-                "timestamp": datetime.utcnow()
-            })
-            
-            return translated_text
-                
-        except Exception as e:
-            error_str = str(e)
-            if "quota" in error_str.lower():
-                logger.warning(f"Rate limit hit for Gemini, permanently disabling Gemini translations")
-                
-                # Permanently disable Gemini
-                gemini_disabled = True
-                
-                # Fallback to standard translation
-                if source_lang == "en":
-                    return translate_from_english(text, target_lang)
-                else:
-                    return translate_to_english(text, source_lang)
-            else:
-                # Other error
-                logger.warning(f"Gemini error: {error_str}")
-                raise
-            
-    except Exception as e:
-        logger.warning(f"Gemini translation from {source_lang} to {target_lang} failed: {str(e)}")
-        # Fallback to standard translation
-        if source_lang == "en":
-            return translate_from_english(text, target_lang)
-        else:
-            return translate_to_english(text, source_lang)
-def batch_translate_with_gemini(texts, source_lang, target_lang):
-    """
-    Translate a batch of texts using Gemini API
-    
-    Args:
-        texts: List of texts to translate
-        source_lang: Source language code
-        target_lang: Target language code
-        
-    Returns:
-        List of translated texts
-    """
-    if not texts:
-        return []
-        
-    translated_texts = []
-    
-    for text in texts:
-        translated_text = translate_with_gemini(text, source_lang, target_lang)
-        translated_texts.append(translated_text)
-    
-    return translated_texts
-def translate_recommendation_results(results, target_language):
-    """
-    Translate recommendation results to the target language using standard translation
-    
-    Args:
-        results: List of recommendation result items to translate
-        target_language: Target language code
-        
-    Returns:
-        Translated recommendation results list
-    """
-    try:
-        logger.info(f"Translating recommendation results to {target_language} using standard translation")
-        
-        # Create copies to avoid modifying originals
-        translated_results = copy.deepcopy(results)
-        
-        # Process each item separately
-        for item in translated_results:
-            # Name
-            if "name" in item and isinstance(item["name"], str) and item["name"]:
-                item["name"] = translate_from_english(item["name"], target_language)
-            
-            # Description
-            if "description" in item and isinstance(item["description"], str) and item["description"]:
-                item["description"] = translate_from_english(item["description"], target_language)
-            
-            # Location - City
-            if "location" in item and "city" in item["location"] and isinstance(item["location"]["city"], str) and item["location"]["city"]:
-                item["location"]["city"] = translate_from_english(item["location"]["city"], target_language)
-            
-            # Location - Country
-            if "location" in item and "country" in item["location"] and isinstance(item["location"]["country"], str) and item["location"]["country"]:
-                item["location"]["country"] = translate_from_english(item["location"]["country"], target_language)
-            
-            # Category
-            if "category" in item and isinstance(item["category"], str) and item["category"]:
-                item["category"] = translate_from_english(item["category"], target_language)
-            
-            # Reason
-            if "reason" in item and isinstance(item["reason"], str) and item["reason"]:
-                item["reason"] = translate_from_english(item["reason"], target_language)
-            
-            # Tags (if present)
-            if "tags" in item and isinstance(item["tags"], list):
-                for tag_idx, tag in enumerate(item["tags"]):
-                    if isinstance(tag, str) and tag:
-                        item["tags"][tag_idx] = translate_from_english(tag, target_language)
-            
-            # Source
-            if "source" in item and isinstance(item["source"], str) and item["source"]:
-                item["source"] = translate_from_english(item["source"], target_language)
-                
-            # Budget level
-            if "budget_level" in item and isinstance(item["budget_level"], str) and item["budget_level"]:
-                item["budget_level"] = translate_from_english(item["budget_level"], target_language)
-                
-            # Accessibility
-            if "accessibility" in item and isinstance(item["accessibility"], list):
-                for acc_idx, feature in enumerate(item["accessibility"]):
-                    if isinstance(feature, str) and feature:
-                        item["accessibility"][acc_idx] = translate_from_english(feature, target_language)
-        
-        logger.info(f"Translated recommendation results using standard translation")
-        return translated_results
-        
-    except Exception as e:
-        logger.error(f"Error translating recommendation results: {str(e)}")
-        # Return original results if translation fails
-        return results        
 def translate_roadmap_results(roadmap_list, target_language):
     """
     Translate roadmap results to the target language
@@ -473,320 +239,7 @@ def translate_roadmap_results(roadmap_list, target_language):
     except Exception as e:
         logger.error(f"Error translating roadmap results: {str(e)}")
         return roadmap_list  # Return original if translation fails
-def translate_roadmap_results_with_gemini(roadmap_list, target_language):
-    """
-    Translate roadmap results to the target language using Gemini
-    
-    Args:
-        roadmap_list: List of roadmap items to translate
-        target_language: Target language code
-        
-    Returns:
-        Translated roadmap list
-    """
-    try:
-        logger.info(f"Translating roadmap results to {target_language} using Gemini")
-        
-        # Create copies to avoid modifying originals
-        translated_results = copy.deepcopy(roadmap_list)
-        
-        # Extract all text fields for batch translation
-        all_fields = []
-        field_mappings = []  # [(item_index, field_path), ...]
-        
-        for item_idx, item in enumerate(translated_results):
-            if "place" in item:
-                place = item["place"]
-                
-                # Name
-                if "name" in place and isinstance(place["name"], str) and place["name"]:
-                    all_fields.append(place["name"])
-                    field_mappings.append((item_idx, ["place", "name"]))
-                
-                # Description
-                if "description" in place and isinstance(place["description"], str) and place["description"]:
-                    all_fields.append(place["description"])
-                    field_mappings.append((item_idx, ["place", "description"]))
-                
-                # Location - City
-                if "location" in place and "city" in place["location"] and isinstance(place["location"]["city"], str) and place["location"]["city"]:
-                    all_fields.append(place["location"]["city"])
-                    field_mappings.append((item_idx, ["place", "location", "city"]))
-                
-                # Location - Country
-                if "location" in place and "country" in place["location"] and isinstance(place["location"]["country"], str) and place["location"]["country"]:
-                    all_fields.append(place["location"]["country"])
-                    field_mappings.append((item_idx, ["place", "location", "country"]))
-                
-                # Tags
-                if "tags" in place and isinstance(place["tags"], list):
-                    for tag_idx, tag in enumerate(place["tags"]):
-                        if isinstance(tag, str) and tag:
-                            all_fields.append(tag)
-                            field_mappings.append((item_idx, ["place", "tags", tag_idx]))
-                
-                # Category
-                if "category" in place and isinstance(place["category"], str) and place["category"]:
-                    all_fields.append(place["category"])
-                    field_mappings.append((item_idx, ["place", "category"]))
-                
-                # Accessibility
-                if "accessibility" in place and isinstance(place["accessibility"], list):
-                    for acc_idx, feature in enumerate(place["accessibility"]):
-                        if isinstance(feature, str) and feature:
-                            all_fields.append(feature)
-                            field_mappings.append((item_idx, ["place", "accessibility", acc_idx]))
-                
-                # Appropriate time
-                if "appropriate_time" in place and isinstance(place["appropriate_time"], list):
-                    for time_idx, month in enumerate(place["appropriate_time"]):
-                        if isinstance(month, str) and month:
-                            all_fields.append(month)
-                            field_mappings.append((item_idx, ["place", "appropriate_time", time_idx]))
-            
-            # Next destination
-            if "next_destination" in item and isinstance(item["next_destination"], str) and item["next_destination"]:
-                all_fields.append(item["next_destination"])
-                field_mappings.append((item_idx, ["next_destination"]))
-        
-        # Use individual translations to avoid event loop issues
-        translated_fields = []
-        for field in all_fields:
-            translated_fields.append(translate_with_gemini(field, "en", target_language))
-        
-        # Update the original data with translations
-        for idx, (item_idx, field_path) in enumerate(field_mappings):
-            if idx >= len(translated_fields):
-                continue
-                
-            # Get the item to modify
-            item = translated_results[item_idx]
-            
-            try:
-                # Handle different field path patterns
-                if field_path[0] == "place":
-                    if len(field_path) == 2:
-                        # Handle direct place properties (e.g., place.name)
-                        item["place"][field_path[1]] = translated_fields[idx]
-                    elif len(field_path) == 3:
-                        if field_path[1] == "tags" and isinstance(field_path[2], int):
-                            # Handle place.tags[index]
-                            if "tags" in item["place"] and len(item["place"]["tags"]) > field_path[2]:
-                                item["place"]["tags"][field_path[2]] = translated_fields[idx]
-                        elif field_path[1] == "accessibility" and isinstance(field_path[2], int):
-                            # Handle place.accessibility[index]
-                            if "accessibility" in item["place"] and len(item["place"]["accessibility"]) > field_path[2]:
-                                item["place"]["accessibility"][field_path[2]] = translated_fields[idx]
-                        elif field_path[1] == "appropriate_time" and isinstance(field_path[2], int):
-                            # Handle place.appropriate_time[index]
-                            if "appropriate_time" in item["place"] and len(item["place"]["appropriate_time"]) > field_path[2]:
-                                item["place"]["appropriate_time"][field_path[2]] = translated_fields[idx]
-                        elif field_path[1] == "location" and field_path[2] in ["city", "country"]:
-                            # Handle place.location.city or place.location.country
-                            if "location" in item["place"]:
-                                item["place"]["location"][field_path[2]] = translated_fields[idx]
-                elif field_path[0] == "next_destination":
-                    # Handle top-level next_destination field
-                    item["next_destination"] = translated_fields[idx]
-            except Exception as e:
-                logger.warning(f"Error updating translated field at path {field_path}: {str(e)}")
-        
-        logger.info(f"Translated {len(all_fields)} fields in roadmap using Gemini")
-        return translated_results
-        
-    except Exception as e:
-        logger.error(f"Error translating roadmap with Gemini: {str(e)}")
-        # Fallback to standard translation
-        return translate_roadmap_results(roadmap_list, target_language)
-def translate_search_results_with_gemini(results, target_language):
-    """
-    Translate search results to the target language using Gemini
-    
-    Args:
-        results: List of search result items to translate
-        target_language: Target language code
-        
-    Returns:
-        Translated search results list
-    """
-    try:
-        logger.info(f"Translating search results to {target_language} using Gemini")
-        
-        # Create copies to avoid modifying originals
-        translated_results = copy.deepcopy(results)
-        
-        # Extract all text fields for batch translation
-        all_fields = []
-        field_mappings = []  # [(item_index, field_name), ...]
-        
-        for item_idx, item in enumerate(translated_results):
-            # Name
-            if "name" in item and isinstance(item["name"], str) and item["name"]:
-                all_fields.append(item["name"])
-                field_mappings.append((item_idx, "name"))
-            
-            # Description
-            if "description" in item and isinstance(item["description"], str) and item["description"]:
-                all_fields.append(item["description"])
-                field_mappings.append((item_idx, "description"))
-            
-            # Location - City
-            if "location" in item and "city" in item["location"] and isinstance(item["location"]["city"], str) and item["location"]["city"]:
-                all_fields.append(item["location"]["city"])
-                field_mappings.append((item_idx, "location.city"))
-            
-            # Location - Country
-            if "location" in item and "country" in item["location"] and isinstance(item["location"]["country"], str) and item["location"]["country"]:
-                all_fields.append(item["location"]["country"])
-                field_mappings.append((item_idx, "location.country"))
-            
-            # Category
-            if "category" in item and isinstance(item["category"], str) and item["category"]:
-                all_fields.append(item["category"])
-                field_mappings.append((item_idx, "category"))
-            
-            # Tags (if present)
-            if "tags" in item and isinstance(item["tags"], list):
-                for tag_idx, tag in enumerate(item["tags"]):
-                    if isinstance(tag, str) and tag:
-                        all_fields.append(tag)
-                        field_mappings.append((item_idx, f"tags.{tag_idx}"))
-        
-        # Use individual translations
-        translated_fields = []
-        for field in all_fields:
-            translated_fields.append(translate_with_gemini(field, "en", target_language))
-        
-        # Update the original data with translations
-        for idx, (item_idx, field_path) in enumerate(field_mappings):
-            if idx >= len(translated_fields):
-                continue
-                
-            # Get the item to modify
-            item = translated_results[item_idx]
-            
-            try:
-                # Handle different field path patterns
-                if "." in field_path:
-                    parts = field_path.split(".")
-                    if parts[0] == "location" and parts[1] in ["city", "country"]:
-                        # Handle location.city or location.country
-                        item["location"][parts[1]] = translated_fields[idx]
-                    elif parts[0] == "tags" and parts[1].isdigit():
-                        # Handle tags[index]
-                        tag_idx = int(parts[1])
-                        if "tags" in item and len(item["tags"]) > tag_idx:
-                            item["tags"][tag_idx] = translated_fields[idx]
-                else:
-                    # Handle direct properties
-                    item[field_path] = translated_fields[idx]
-            except Exception as e:
-                logger.warning(f"Error updating translated field at path {field_path}: {str(e)}")
-        
-        logger.info(f"Translated {len(all_fields)} fields in search results using Gemini")
-        return translated_results
-        
-    except Exception as e:
-        logger.error(f"Error translating search results with Gemini: {str(e)}")
-        # Fallback to standard translation
-        return translate_search_results(results, target_language)
-def translate_recommendations_with_gemini(results, target_language):
-    """
-    Translate recommendation results to the target language using Gemini
-    
-    Args:
-        results: List of recommendation result items to translate
-        target_language: Target language code
-        
-    Returns:
-        Translated recommendation results list
-    """
-    try:
-        logger.info(f"Translating recommendation results to {target_language} using Gemini")
-        
-        # Create copies to avoid modifying originals
-        translated_results = copy.deepcopy(results)
-        
-        # Extract all text fields for batch translation
-        all_fields = []
-        field_mappings = []  # [(item_index, field_name), ...]
-        
-        for item_idx, item in enumerate(translated_results):
-            # Name
-            if "name" in item and isinstance(item["name"], str) and item["name"]:
-                all_fields.append(item["name"])
-                field_mappings.append((item_idx, "name"))
-            
-            # Description
-            if "description" in item and isinstance(item["description"], str) and item["description"]:
-                all_fields.append(item["description"])
-                field_mappings.append((item_idx, "description"))
-            
-            # Location - City
-            if "location" in item and "city" in item["location"] and isinstance(item["location"]["city"], str) and item["location"]["city"]:
-                all_fields.append(item["location"]["city"])
-                field_mappings.append((item_idx, "location.city"))
-            
-            # Location - Country
-            if "location" in item and "country" in item["location"] and isinstance(item["location"]["country"], str) and item["location"]["country"]:
-                all_fields.append(item["location"]["country"])
-                field_mappings.append((item_idx, "location.country"))
-            
-            # Category
-            if "category" in item and isinstance(item["category"], str) and item["category"]:
-                all_fields.append(item["category"])
-                field_mappings.append((item_idx, "category"))
-            
-            # Reason
-            if "reason" in item and isinstance(item["reason"], str) and item["reason"]:
-                all_fields.append(item["reason"])
-                field_mappings.append((item_idx, "reason"))
-                
-            # Tags (if present)
-            if "tags" in item and isinstance(item["tags"], list):
-                for tag_idx, tag in enumerate(item["tags"]):
-                    if isinstance(tag, str) and tag:
-                        all_fields.append(tag)
-                        field_mappings.append((item_idx, f"tags.{tag_idx}"))
-        
-        # Use individual translations
-        translated_fields = []
-        for field in all_fields:
-            translated_fields.append(translate_with_gemini(field, "en", target_language))
-        
-        # Update the original data with translations
-        for idx, (item_idx, field_path) in enumerate(field_mappings):
-            if idx >= len(translated_fields):
-                continue
-                
-            # Get the item to modify
-            item = translated_results[item_idx]
-            
-            try:
-                # Handle different field path patterns
-                if "." in field_path:
-                    parts = field_path.split(".")
-                    if parts[0] == "location" and parts[1] in ["city", "country"]:
-                        # Handle location.city or location.country
-                        item["location"][parts[1]] = translated_fields[idx]
-                    elif parts[0] == "tags" and parts[1].isdigit():
-                        # Handle tags[index]
-                        tag_idx = int(parts[1])
-                        if "tags" in item and len(item["tags"]) > tag_idx:
-                            item["tags"][tag_idx] = translated_fields[idx]
-                else:
-                    # Handle direct properties
-                    item[field_path] = translated_fields[idx]
-            except Exception as e:
-                logger.warning(f"Error updating translated field at path {field_path}: {str(e)}")
-        
-        logger.info(f"Translated {len(all_fields)} fields in recommendation results using Gemini")
-        return translated_results
-        
-    except Exception as e:
-        logger.error(f"Error translating recommendation results with Gemini: {str(e)}")
-        # Fallback to standard translation
-        return translate_recommendation_results(results, target_language)        
+
 # Define DummyNLP in global scope for fallback
 class DummyNLP:
     def __init__(self):
@@ -1006,25 +459,6 @@ if has_vectors:
     logger.info("✅ SUCCESS: NLP Model loaded with WORD VECTORS - semantic search will work properly")
 else:
     logger.warning("⚠️ WARNING: NLP Model doesn't have word vectors - semantic search will use fallback algorithm")
-
-def initialize_gemini_api():
-    """Initialize Gemini API client"""
-    try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            logger.warning("GEMINI_API_KEY not set, Gemini translation will not be available")
-            return None
-            
-        # Configure the generation client with your API key
-        genai.configure(api_key=api_key)
-        
-        # Just return the config for now, we'll check available models in the translation function
-        logger.info("Successfully initialized Gemini API client")
-        return True
-            
-    except Exception as e:
-        logger.error(f"Error initializing Gemini API: {str(e)}")
-        return None
 # Initialize FastAPI app
 app = FastAPI(
     title="Travel API",
@@ -4247,55 +3681,108 @@ async def health_check():
                 "error": str(e)
             }
         )
-@app.get("/recommendations/{user_id}", response_model=Dict)
+@app.get("/recommendations/{user_id}")
 async def get_recommendations(
     user_id: str,
-    language: str = None,
-    use_gemini: bool = False,
-    translate_results: bool = True
+    num: int = Query(10, ge=1, le=50),
+    force_refresh: bool = Query(False),
+    translate_results: bool = Query(False, description="Whether to translate results to user's preferred language"),
+    language: Optional[str] = Query(None, description="Override language for translation"),
+    background_tasks: BackgroundTasks = None
 ):
     """
-    Get travel recommendations for a user
+    Get recommendations for a user with progressive pagination and translation support.
+    First request: Return 10 new places
+    Second request: Return 10 new places + previous 10 = 20 total
+    Third request and beyond: Return 10 new places + 20 most recent shown places = 30 total
+    
+    Args:
+        user_id: User ID
+        num: Number of NEW recommendations to return (default 10)
+        force_refresh: Whether to force fresh recommendations
+        translate_results: Whether to translate results to user's preferred language
+        language: Override language for translation (if not specified, uses user's last search language)
     """
     try:
-        # Get user preferences or set defaults if none
-        user = users_collection.find_one({"id": user_id})
-        if not user:
-            return JSONResponse(
-                status_code=404, 
-                content={"success": False, "error": f"User {user_id} not found"}
-            )
-            
-        # Generate recommendations using the caching system
-        recommendation_data = get_recommendations_with_caching(user_id)
+        # Get recommendations with the enhanced progressive pagination
+        recommendation_data = get_recommendations_with_caching(
+            user_id, 
+            force_refresh=force_refresh, 
+            num_new_recommendations=num
+        )
         
-        # Combine new and previously shown recommendations into a single list
-        recommendations = recommendation_data["new_recommendations"] + recommendation_data["previously_shown"]
+        # Combine new and previously shown recommendations
+        all_recommendations = recommendation_data["new_recommendations"] + recommendation_data["previously_shown"]
         
-        # Translate results if requested
-        if translate_results and language and language != "en":
-            try:
-                if use_gemini:
-                    # Use Gemini translation
-                    recommendations = translate_recommendations_with_gemini(recommendations, language)
-                else:
-                    # Use standard translation
-                    recommendations = translate_recommendation_results(recommendations, language)
-            except Exception as e:
-                logger.error(f"Translation error: {str(e)}")
-                # Continue with untranslated recommendations
+        # Check if we need to regenerate cache
+        if background_tasks:
+            cache_count = recommendations_cache_collection.count_documents({"user_id": user_id})
+            if cache_count < 4:
+                # Schedule cache regeneration in background
+                logger.info(f"Cache count low ({cache_count}), scheduling regeneration")
+                background_tasks.add_task(background_cache_recommendations, user_id, 6)
         
-        # Wrap in dictionary to match response_model=Dict
-        response = {
-            "success": True,
-            "recommendations": recommendations
-        }
+        # Handle translation if requested
+        target_language = language
+        translated = False
         
-        # Return the wrapped dictionary
-        return response
+        if translate_results and len(all_recommendations) > 0:
+            # If language not specified, try to determine from user's search history
+            if not target_language:
+                # Get user's most recent search to determine language
+                recent_search = search_queries_collection.find_one(
+                    {"user_id": user_id},
+                    sort=[("timestamp", -1)]
+                )
                 
+                if recent_search and "detected_language" in recent_search:
+                    target_language = recent_search["detected_language"]
+            
+            # Only translate if target language is valid and not English
+            if target_language and target_language not in ['en', 'und']:
+                translated_recommendations = []
+                
+                for place in all_recommendations:
+                    # Create a copy of the place to modify
+                    translated_place = dict(place)
+                    
+                    # Translate key fields
+                    if "name" in place:
+                        translated_place["name"] = translate_from_english(place["name"], target_language)
+                        
+                    if "description" in place:
+                        translated_place["description"] = translate_from_english(place["description"], target_language)
+                        
+                    if "category" in place:
+                        translated_place["category"] = translate_from_english(place["category"], target_language)
+                        
+                    # Translate tags if present
+                    if "tags" in place and isinstance(place["tags"], list):
+                        translated_place["tags"] = [
+                            translate_from_english(tag, target_language) 
+                            for tag in place["tags"]
+                        ]
+                    
+                    translated_recommendations.append(translated_place)
+                    
+                all_recommendations = translated_recommendations
+                translated = True
+                logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
+        
+        # Return recommendations
+        return {
+            "success": True,
+            "user_id": user_id,
+            "count": len(all_recommendations),
+            "new_count": len(recommendation_data["new_recommendations"]),
+            "history_count": len(recommendation_data["previously_shown"]),
+            "recommendations": all_recommendations,
+            "cache_used": not force_refresh and len(recommendation_data["new_recommendations"]) > 0,
+            "translated": translated,
+            "language": target_language if translated else "en"
+        }
     except Exception as e:
-        logger.error(f"Error getting recommendations: {str(e)}")
+        logger.error(f"Error generating recommendations: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}
@@ -4428,78 +3915,6 @@ async def test_translation(text: str = "مرحبا بالعالم"):
         "translated": translated,
         "success": True
     }
-@app.get("/test_gemini_models", response_model=Dict)
-async def test_gemini_models():
-    """
-    Test endpoint to list available Gemini models
-    """
-    try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return {"success": False, "error": "GEMINI_API_KEY not set"}
-            
-        # Configure the generation client with your API key
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        
-        try:
-            # Try to list available models
-            available_models = genai.list_models()
-            model_names = [m.name for m in available_models]
-            logger.info(f"Available models: {model_names}")
-            
-            # Try to identify text models
-            text_models = []
-            for model in available_models:
-                if hasattr(model, 'supported_generation_methods'):
-                    methods = model.supported_generation_methods
-                    if 'generateContent' in methods:
-                        text_models.append(model.name)
-            
-            logger.info(f"Text-capable models: {text_models}")
-            
-            return {
-                "success": True,
-                "available_models": model_names,
-                "text_capable_models": text_models,
-                "model_details": [
-                    {
-                        "name": m.name,
-                        "display_name": getattr(m, "display_name", "N/A"),
-                        "description": getattr(m, "description", "N/A"),
-                        "supported_generation_methods": getattr(m, "supported_generation_methods", [])
-                    }
-                    for m in available_models
-                ]
-            }
-        except Exception as e:
-            return {"success": False, "error": f"Error listing models: {str(e)}"}
-            
-    except Exception as e:
-        logger.error(f"Error in Gemini models test: {str(e)}")
-        return {"success": False, "error": str(e)}
-@app.get("/test_gemini_translation", response_model=Dict)
-async def test_gemini_translation(
-    text: str,
-    target_lang: str = "ar"
-):
-    """
-    Test endpoint for Gemini translation
-    """
-    try:
-        translated = translate_with_gemini(text, "en", target_lang)
-        return {
-            "success": True,
-            "original": text,
-            "translated": translated,
-            "target_language": target_lang
-        }
-    except Exception as e:
-        logger.error(f"Error in Gemini translation test: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
-        )
 @app.delete("/cache/{user_id}")
 async def clear_cache(user_id: str):
     """
@@ -4585,30 +4000,209 @@ async def get_user_shown_places(user_id: str):
         )
 # --- PART 7: API ENDPOINTS (SEARCH AND ROADMAP) ---
 
-@app.get("/search/{user_id}", response_model=Dict)
+@app.get("/search/{user_id}")
 async def search_places(
-    request: SearchRequest = Depends(),
-    translate_results: bool = False,
-    language: str = None,
-    use_gemini: bool = False
+    user_id: str,
+    query: str = Query(..., min_length=1),
+    limit: int = Query(10, ge=1, le=50),
+    translate_results: bool = Query(False, description="Whether to translate results back to the query language"),
+    language: Optional[str] = Query(None, description="Override detected language")
 ):
     """
-    Search for places based on query
+    Search for places based on a text query with language support
+    
+    Args:
+        user_id: User ID (for tracking)
+        query: Search query string
+        limit: Maximum number of results to return
+        translate_results: Whether to translate results back to the query language
+        language: Override automatically detected language
     """
     try:
-        # ... existing code ...
+        # Store original query
+        original_query = query
         
-        # Translate results if requested
-        if translate_results and language:
-            if use_gemini:
-                # Use Gemini translation
-                results = translate_search_results_with_gemini(results, language)
-            else:
-                # Use standard translation
-                results = translate_search_results(results, language)
+        # Use provided language or detect language
+        detected_language = language if language else detect_language(query)
         
-        # ... rest of existing code ...
+        # Translate query to English if needed
+        if detected_language != 'en':
+            # Translate query to English for better matching
+            translated_query = translate_to_english(query)
+            logger.info(f"Translated search query from '{original_query}' ({detected_language}) to '{translated_query}'")
+            query = translated_query
+        
+        # Track search query with translation info
+        search_queries_collection.insert_one({
+            "user_id": user_id,
+            "query": original_query,
+            "translated_query": query if detected_language != 'en' else None,
+            "detected_language": detected_language,
+            "timestamp": datetime.now()
+        })
+        
+        # Get all places
+        all_places = list(places_collection.find())
+        
+        # Improved method to score results with semantic search
+        results = []
+        
+        # Check if NLP model has word vectors
+        test_doc = nlp("test")
+        has_vectors = hasattr(test_doc, 'vector_norm') and test_doc.vector_norm > 0
+        
+        if has_vectors:
+            # Use semantic search for better matching
+            query_doc = nlp(query.lower())
+            
+            for place in all_places:
+                # Initialize score components
+                name_score = 0
+                desc_score = 0
+                tag_score = 0
+                category_score = 0
                 
+                # 1. Exact name match (highest weight)
+                if query.lower() in place.get("name", "").lower():
+                    name_score = 0.9  # Direct substring match
+                
+                # Try semantic match on name
+                place_name = place.get("name", "")
+                if place_name:
+                    place_name_doc = nlp(place_name.lower())
+                    name_similarity = query_doc.similarity(place_name_doc)
+                    name_score = max(name_score, name_similarity * 0.8)  # Max of exact or semantic
+                
+                # 2. Description match
+                description = place.get("description", "")
+                if description:
+                    if query.lower() in description.lower():
+                        desc_score = 0.5  # Direct substring match in description
+                    
+                    # Semantic similarity for description (if not too long)
+                    if len(description) < 1000:  # Avoid processing very long descriptions
+                        desc_doc = nlp(description.lower())
+                        desc_score = max(desc_score, query_doc.similarity(desc_doc) * 0.5)
+                
+                # 3. Tags match
+                tags = place.get("tags", [])
+                if tags:
+                    # Check for direct tag matches
+                    if query.lower() in [tag.lower() for tag in tags]:
+                        tag_score = 0.8  # Direct tag match
+                    
+                    # Semantic similarity for tags
+                    max_tag_similarity = 0
+                    for tag in tags:
+                        tag_doc = nlp(tag.lower())
+                        similarity = query_doc.similarity(tag_doc)
+                        max_tag_similarity = max(max_tag_similarity, similarity)
+                    
+                    tag_score = max(tag_score, max_tag_similarity * 0.7)
+                
+                # 4. Category match
+                category = place.get("category", "")
+                if category:
+                    if query.lower() in category.lower():
+                        category_score = 0.7  # Direct category match
+                    
+                    # Semantic similarity for category
+                    category_doc = nlp(category.lower())
+                    category_score = max(category_score, query_doc.similarity(category_doc) * 0.6)
+                
+                # Compute final score with weights
+                # Name (40%), Tags (30%), Category (20%), Description (10%)
+                final_score = (
+                    0.4 * name_score +
+                    0.3 * tag_score +
+                    0.2 * category_score +
+                    0.1 * desc_score
+                )
+                
+                # Only add results with a minimum relevance
+                if final_score > 0.3:  # Threshold for relevance
+                    place["search_score"] = final_score
+                    results.append({
+                        "place": place,
+                        "score": final_score
+                    })
+                
+        else:
+            # Fallback to basic text matching if vectors aren't available
+            logger.warning("Word vectors not available, using basic text search")
+            
+            for place in all_places:
+                score = 0
+                
+                # Exact name match - highest score
+                if query.lower() in place.get("name", "").lower():
+                    score = 1.0
+                # Tag match - high score
+                elif "tags" in place and any(query.lower() in tag.lower() for tag in place.get("tags", [])):
+                    score = 0.8
+                # Category match - medium score
+                elif "category" in place and query.lower() in place.get("category", "").lower():
+                    score = 0.7
+                # Description match - lower score
+                elif "description" in place and query.lower() in place.get("description", "").lower():
+                    score = 0.5
+                    
+                if score > 0:
+                    # Add to results with score
+                    place["search_score"] = score
+                    results.append({
+                        "place": place,
+                        "score": score
+                    })
+                
+        # Sort by score (highest first) and limit results
+        sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
+        
+        # Extract just the place data
+        final_results = [item["place"] for item in sorted_results]
+        
+        # Translate results back to original language if requested
+        if translate_results and detected_language not in ['en', 'und'] and len(final_results) > 0:
+            translated_results = []
+            
+            for place in final_results:
+                # Create a copy of the place to modify
+                translated_place = dict(place)
+                
+                # Translate key fields
+                if "name" in place:
+                    translated_place["name"] = translate_from_english(place["name"], detected_language)
+                    
+                if "description" in place:
+                    translated_place["description"] = translate_from_english(place["description"], detected_language)
+                    
+                if "category" in place:
+                    translated_place["category"] = translate_from_english(place["category"], detected_language)
+                    
+                # Translate tags if present
+                if "tags" in place and isinstance(place["tags"], list):
+                    translated_place["tags"] = [
+                        translate_from_english(tag, detected_language) 
+                        for tag in place["tags"]
+                    ]
+                
+                translated_results.append(translated_place)
+                
+            final_results = translated_results
+            logger.info(f"Translated {len(final_results)} results to {detected_language}")
+        
+        # Include translation info in response
+        return {
+            "success": True,
+            "user_id": user_id,
+            "query": original_query,
+            "translated_query": query if detected_language != 'en' else None,
+            "detected_language": detected_language,
+            "count": len(final_results),
+            "results": final_results,
+            "translated_results": translate_results and detected_language not in ['en', 'und']
+        }
+        
     except Exception as e:
         logger.error(f"Error searching places: {str(e)}")
         return JSONResponse(
@@ -4698,50 +4292,43 @@ async def clear_search_history(user_id: str):
             content={"success": False, "error": str(e)}
         )
 
-@app.get("/roadmap/{user_id}", response_model=Dict)
-async def get_roadmap(
-    user_id: str,
-    request: RoadmapRequest = Depends(),
-    language: str = None,
-    use_gemini: bool = False
-):
+# --- Roadmap API Endpoints ---
+@app.get("/roadmap/{user_id}")
+async def get_roadmap(user_id: str, language: str = None):
     """
-    Get a travel roadmap for a user
+    Get a travel roadmap for a specific user
+    
+    Uses caching: Only regenerates if user's travel preferences have changed
+    Optional language parameter for translation
     """
     try:
-        # First, make sure roadmap_list is defined
-        # Get the roadmap data from cache or generate it
-        cached_roadmap = roadmaps_collection.find_one({"user_id": user_id})
+        logger.info(f"Roadmap request for user {user_id}")
         
-        if cached_roadmap and "roadmap_data" in cached_roadmap:
-            roadmap_data = cached_roadmap["roadmap_data"]
-            # Convert to list format
-            roadmap_list = simplify_roadmap_to_list(roadmap_data)
-        else:
-            # Generate new roadmap
-            roadmap_data = generate_hybrid_roadmap(user_id)
-            # Convert to list format
-            roadmap_list = simplify_roadmap_to_list(roadmap_data)
+        # Get roadmap (cached or newly generated)
+        roadmap_data = await get_roadmap_with_caching(user_id)
         
-        # THEN translate roadmap if requested
-        if language and roadmap_list:
-            logger.info(f"Translating roadmap to {language}{' using Gemini' if use_gemini else ''}")
-            if use_gemini:
-                # Use Gemini translation
-                roadmap_list = translate_roadmap_results_with_gemini(roadmap_list, language)
-            else:
-                # Use standard translation
-                roadmap_list = translate_roadmap_results(roadmap_list, language)
+        # Simplify to list format
+        simplified_list = simplify_roadmap_to_list(roadmap_data)
+        
+        # Translate if language parameter is provided
+        if language:
+            logger.info(f"Translating roadmap to {language}")
+            simplified_list = translate_roadmap_results(simplified_list, language)
         
         return {
-            "success": True,
-            "user_id": user_id,
-            "count": len(roadmap_list) if roadmap_list else 0,
-            "data": roadmap_list
+            "success": True, 
+            "user_id": user_id, 
+            "count": len(simplified_list),
+            "data": simplified_list,
+            "metadata": {
+                "budget_level": roadmap_data.get("budget_level"),
+                "group_type": roadmap_data.get("group_type"),
+                "start_date": roadmap_data.get("start_date"),
+                "accessibility_needs": roadmap_data.get("accessibility_needs", [])
+            }
         }
-                
     except Exception as e:
-        logger.error(f"Error getting roadmap: {str(e)}")
+        logger.error(f"Error generating roadmap: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}
@@ -5076,16 +4663,7 @@ async def server_exception_handler(request: Request, exc):
         status_code=500,
         content={"success": False, "error": "Internal server error"}
     )
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services at startup"""
-    try:
-        # Initialize Gemini API
-        initialize_gemini_api()
-    except Exception as e:
-        logger.error(f"Startup error: {str(e)}")
 
-        
 # --- Server Startup ---
 if __name__ == "__main__":
     import uvicorn

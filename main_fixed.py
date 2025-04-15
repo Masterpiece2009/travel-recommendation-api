@@ -235,32 +235,34 @@ def translate_with_gemini(text, source_lang, target_lang):
         # Direct content generation approach
         prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text without quotes: \"{text}\""
         
-        try:
-            # Try using a specific model - gemini-1.0-pro-latest is a safer choice
-            gen_model = genai.GenerativeModel("gemini-1.0-pro-latest")
-            response = gen_model.generate_content(prompt)
-            translated_text = response.text.strip()
-        except Exception as model_error:
-            logger.warning(f"Model 'gemini-1.0-pro-latest' failed: {str(model_error)}")
-            
+        # Models to try, in order of preference (based on your available models)
+        model_names = [
+            "models/gemini-1.5-pro-latest",
+            "models/gemini-1.5-pro",
+            "models/gemini-1.5-pro-002",
+            "models/gemini-1.5-flash-latest",
+            "models/gemini-1.5-flash"
+        ]
+        
+        translated_text = None
+        last_error = None
+        
+        # Try each model in sequence
+        for model_name in model_names:
             try:
-                # Try alternative model names
-                for model_name in ["gemini-pro", "gemini", "gemini-1.0-pro", "models/gemini-pro"]:
-                    try:
-                        logger.info(f"Trying model: {model_name}")
-                        gen_model = genai.GenerativeModel(model_name)
-                        response = gen_model.generate_content(prompt)
-                        translated_text = response.text.strip()
-                        logger.info(f"Successfully used model: {model_name}")
-                        break
-                    except Exception as e:
-                        logger.warning(f"Model {model_name} failed: {str(e)}")
-                else:
-                    raise Exception("All model attempts failed")
-                    
-            except Exception as alternate_error:
-                logger.warning(f"All model attempts failed: {str(alternate_error)}")
-                raise Exception(f"Failed to use any available model: {str(alternate_error)}")
+                logger.info(f"Trying translation with model: {model_name}")
+                gen_model = genai.GenerativeModel(model_name)
+                response = gen_model.generate_content(prompt)
+                translated_text = response.text.strip()
+                logger.info(f"Successfully used model: {model_name}")
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Model {model_name} failed: {str(e)}")
+        
+        # If all models failed, raise exception
+        if translated_text is None:
+            raise Exception(f"All models failed. Last error: {str(last_error)}")
         
         # Remove quotes if they were added by the model
         if translated_text.startswith('"') and translated_text.endswith('"'):

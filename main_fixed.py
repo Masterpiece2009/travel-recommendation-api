@@ -236,8 +236,8 @@ def translate_with_gemini(text, source_lang, target_lang):
         prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text without quotes: \"{text}\""
         
         # Use only the flash model that works
-        model_name = "models/gemini-1.5-flash-latest"
-        
+# Change this line in your function
+model_name = "models/gemini-1.5-flash-8b-latest"  # or "models/gemini-1.5-flash-8b" without latest        
         logger.info(f"Using translation model: {model_name}")
         gen_model = genai.GenerativeModel(model_name)
         response = gen_model.generate_content(prompt)

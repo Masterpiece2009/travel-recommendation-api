@@ -445,8 +445,10 @@ def translate_roadmap_results_with_gemini(roadmap_list, target_language):
                 all_fields.append(item["next_destination"])
                 field_mappings.append((item_idx, ["next_destination"]))
         
-        # Use individual translations since we've had issues with event loops
-        translated_fields = [translate_from_english(field, target_language) for field in all_fields]
+        # Use individual translations to avoid event loop issues
+        translated_fields = []
+        for field in all_fields:
+            translated_fields.append(translate_with_gemini(field, "en", target_language))
         
         # Update the original data with translations
         for idx, (item_idx, field_path) in enumerate(field_mappings):
@@ -485,7 +487,7 @@ def translate_roadmap_results_with_gemini(roadmap_list, target_language):
             except Exception as e:
                 logger.warning(f"Error updating translated field at path {field_path}: {str(e)}")
         
-        logger.info(f"Translated {len(all_fields)} fields in roadmap using individual translations")
+        logger.info(f"Translated {len(all_fields)} fields in roadmap using Gemini")
         return translated_results
         
     except Exception as e:

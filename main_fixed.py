@@ -27,6 +27,9 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 import json
 import asyncio
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from typing import Dict, List, Optional
 def detect_language(text):
     """
     Detect the language of a text string with improved Arabic detection.

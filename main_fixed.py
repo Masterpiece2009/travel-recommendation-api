@@ -4321,7 +4321,56 @@ async def test_translation(text: str = "مرحبا بالعالم"):
         "translated": translated,
         "success": True
     }
-
+@app.get("/test_gemini_models", response_model=Dict)
+async def test_gemini_models():
+    """
+    Test endpoint to list available Gemini models
+    """
+    try:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return {"success": False, "error": "GEMINI_API_KEY not set"}
+            
+        # Configure the generation client with your API key
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        
+        try:
+            # Try to list available models
+            available_models = genai.list_models()
+            model_names = [m.name for m in available_models]
+            logger.info(f"Available models: {model_names}")
+            
+            # Try to identify text models
+            text_models = []
+            for model in available_models:
+                if hasattr(model, 'supported_generation_methods'):
+                    methods = model.supported_generation_methods
+                    if 'generateContent' in methods:
+                        text_models.append(model.name)
+            
+            logger.info(f"Text-capable models: {text_models}")
+            
+            return {
+                "success": True,
+                "available_models": model_names,
+                "text_capable_models": text_models,
+                "model_details": [
+                    {
+                        "name": m.name,
+                        "display_name": getattr(m, "display_name", "N/A"),
+                        "description": getattr(m, "description", "N/A"),
+                        "supported_generation_methods": getattr(m, "supported_generation_methods", [])
+                    }
+                    for m in available_models
+                ]
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Error listing models: {str(e)}"}
+            
+    except Exception as e:
+        logger.error(f"Error in Gemini models test: {str(e)}")
+        return {"success": False, "error": str(e)}
 @app.get("/test_gemini_translation", response_model=Dict)
 async def test_gemini_translation(
     text: str,

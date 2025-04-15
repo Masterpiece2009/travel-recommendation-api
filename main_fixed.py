@@ -917,14 +917,9 @@ def initialize_gemini_api():
         # Configure the generation client with your API key
         genai.configure(api_key=api_key)
         
-        # Try the base model name instead of gemini-pro
-        try:
-            model = genai.GenerativeModel('gemini')
-            logger.info("Successfully initialized Gemini model")
-            return model
-        except Exception as model_error:
-            logger.warning(f"Could not initialize Gemini model: {str(model_error)}")
-            return None
+        # Just return the config for now, we'll check available models in the translation function
+        logger.info("Successfully initialized Gemini API client")
+        return True
             
     except Exception as e:
         logger.error(f"Error initializing Gemini API: {str(e)}")

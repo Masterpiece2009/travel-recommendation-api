@@ -4055,6 +4055,7 @@ async def get_recommendations(
     force_refresh: bool = Query(False),
     translate_results: bool = Query(False, description="Whether to translate results to user's preferred language"),
     language: Optional[str] = Query(None, description="Override language for translation"),
+    use_gemini: bool = Query(True, description="Whether to use Gemini for translation"),
     background_tasks: BackgroundTasks = None
 ):
     """
@@ -4069,6 +4070,7 @@ async def get_recommendations(
         force_refresh: Whether to force fresh recommendations
         translate_results: Whether to translate results to user's preferred language
         language: Override language for translation (if not specified, uses user's last search language)
+        use_gemini: Whether to use Gemini for translation (higher quality)
     """
     try:
         # Get recommendations with the enhanced progressive pagination
@@ -4107,34 +4109,93 @@ async def get_recommendations(
             
             # Only translate if target language is valid and not English
             if target_language and target_language not in ['en', 'und']:
-                translated_recommendations = []
-                
-                for place in all_recommendations:
-                    # Create a copy of the place to modify
-                    translated_place = dict(place)
+                if use_gemini:
+                    # Use batch translation with Gemini for better performance
+                    all_fields = []
+                    field_mappings = []  # [(place_idx, field_name), (place_idx, ['tags', tag_idx]), ...]
                     
-                    # Translate key fields
-                    if "name" in place:
-                        translated_place["name"] = translate_from_english(place["name"], target_language)
+                    for place_idx, place in enumerate(all_recommendations):
+                        # Name
+                        if "name" in place and place["name"]:
+                            all_fields.append(place["name"])
+                            field_mappings.append((place_idx, "name"))
                         
-                    if "description" in place:
-                        translated_place["description"] = translate_from_english(place["description"], target_language)
+                        # Description
+                        if "description" in place and place["description"]:
+                            all_fields.append(place["description"])
+                            field_mappings.append((place_idx, "description"))
                         
-                    if "category" in place:
-                        translated_place["category"] = translate_from_english(place["category"], target_language)
+                        # Category
+                        if "category" in place and place["category"]:
+                            all_fields.append(place["category"])
+                            field_mappings.append((place_idx, "category"))
                         
-                    # Translate tags if present
-                    if "tags" in place and isinstance(place["tags"], list):
-                        translated_place["tags"] = [
-                            translate_from_english(tag, target_language) 
-                            for tag in place["tags"]
-                        ]
+                        # Tags
+                        if "tags" in place and isinstance(place["tags"], list):
+                            for tag_idx, tag in enumerate(place["tags"]):
+                                if tag:
+                                    all_fields.append(tag)
+                                    field_mappings.append((place_idx, ["tags", tag_idx]))
+                        
+                        # Location - City
+                        if "location" in place and "city" in place["location"] and place["location"]["city"]:
+                            all_fields.append(place["location"]["city"])
+                            field_mappings.append((place_idx, ["location", "city"]))
+                        
+                        # Location - Country
+                        if "location" in place and "country" in place["location"] and place["location"]["country"]:
+                            all_fields.append(place["location"]["country"])
+                            field_mappings.append((place_idx, ["location", "country"]))
                     
-                    translated_recommendations.append(translated_place)
+                    # Perform batch translation using asyncio
+                    if all_fields:
+                        loop = asyncio.get_event_loop()
+                        translated_fields = loop.run_until_complete(
+                            batch_translate_with_gemini(all_fields, "en", target_language)
+                        )
+                        
+                        # Update results with translations
+                        for i, (place_idx, field_id) in enumerate(field_mappings):
+                            if isinstance(field_id, str):
+                                # For top-level fields like name, description
+                                all_recommendations[place_idx][field_id] = translated_fields[i]
+                            else:
+                                # For nested fields like tags[i] or location.city
+                                if len(field_id) == 2:
+                                    all_recommendations[place_idx][field_id[0]][field_id[1]] = translated_fields[i]
+                        
+                        translated = True
+                        logger.info(f"Batch translated {len(all_fields)} fields to {target_language} using Gemini")
+                else:
+                    # Use original approach with individual translations
+                    translated_recommendations = []
                     
-                all_recommendations = translated_recommendations
-                translated = True
-                logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
+                    for place in all_recommendations:
+                        # Create a copy of the place to modify
+                        translated_place = dict(place)
+                        
+                        # Translate key fields
+                        if "name" in place:
+                            translated_place["name"] = translate_from_english(place["name"], target_language)
+                            
+                        if "description" in place:
+                            translated_place["description"] = translate_from_english(place["description"], target_language)
+                            
+                        if "category" in place:
+                            translated_place["category"] = translate_from_english(place["category"], target_language)
+                            
+                        # Translate tags if present
+                        if "tags" in place and isinstance(place["tags"], list):
+                            translated_place["tags"] = [
+                                translate_from_english(tag, target_language) 
+                                for tag in place["tags"]
+                            ]
+                        
+                        translated_recommendations.append(translated_place)
+                        
+                    all_recommendations = translated_recommendations
+                    translated = True
+                    logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
         
         # Return recommendations
         return {
@@ -4146,7 +4207,8 @@ async def get_recommendations(
             "recommendations": all_recommendations,
             "cache_used": not force_refresh and len(recommendation_data["new_recommendations"]) > 0,
             "translated": translated,
-            "language": target_language if translated else "en"
+            "language": target_language if translated else "en",
+            "translation_service": "gemini" if translated and use_gemini else "standard"
         }
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")

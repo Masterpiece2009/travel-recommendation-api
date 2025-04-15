@@ -30,6 +30,7 @@ import asyncio
 def detect_language(text):
     """
     Detect the language of a text string with improved Arabic detection.
+    Uses Gemini for better accuracy with fallback to traditional methods.
     
     Args:
         text: Text string to analyze
@@ -38,13 +39,12 @@ def detect_language(text):
         Language code (e.g., 'en', 'ar')
     """
     try:
-        from langdetect import detect
         import re
         
         if not text or len(text.strip()) == 0:
             return "en"
         
-        # Check for Arabic script characters
+        # Check for Arabic script characters - fastest method first
         arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+')
         if arabic_pattern.search(text):
             # For short texts with Arabic characters, we'll default to Arabic
@@ -52,7 +52,28 @@ def detect_language(text):
             if len(text) < 20:
                 return "ar"
         
-        # Use standard detection for longer texts
+        # Try Gemini for more accurate detection for complex or ambiguous cases
+        try:
+            # Only use Gemini for longer, more complex texts to save API calls
+            if len(text) > 15 and not re.match(r'^[a-zA-Z\s.,!?0-9]+$', text):
+                model = genai.GenerativeModel('gemini-pro')
+                prompt = f"""
+                Detect the language of this text. Respond with just the ISO 639-1 language code (e.g., 'en', 'ar', 'fr', 'es', etc.): 
+                
+                "{text}"
+                """
+                
+                response = model.generate_content(prompt)
+                if response.text:
+                    lang_code = response.text.strip().lower()
+                    # Validate the language code format
+                    if re.match(r'^[a-z]{2}(-[a-z]{2})?$', lang_code):
+                        return lang_code.split('-')[0]  # Return the primary language code
+        except Exception as e:
+            logger.warning(f"Gemini language detection failed: {e}")
+        
+        # Fallback to standard detection
+        from langdetect import detect
         detected = detect(text)
         
         # Fix common misidentification between Persian and Arabic

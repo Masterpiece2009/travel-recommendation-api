@@ -4183,22 +4183,25 @@ async def get_recommendations(
     user_id: str,
     language: str = None,
     use_gemini: bool = False,
-    translate_results: bool = True  # Default to True to make it work with your URL
+    translate_results: bool = True
 ):
     """
     Get travel recommendations for a user
     """
     try:
         # Get user preferences or set defaults if none
-        user = db.users.find_one({"id": user_id})
+        user = users_collection.find_one({"id": user_id})
         if not user:
             return JSONResponse(
                 status_code=404, 
                 content={"success": False, "error": f"User {user_id} not found"}
             )
             
-        # Generate recommendations
-        recommendations = generate_recommendations(user_id)
+        # Generate recommendations using the caching system
+        recommendation_data = get_recommendations_with_caching(user_id)
+        
+        # Combine new and previously shown recommendations into a single list
+        recommendations = recommendation_data["new_recommendations"] + recommendation_data["previously_shown"]
         
         # Translate results if requested
         if translate_results and language and language != "en":

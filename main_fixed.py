@@ -453,7 +453,118 @@ def translate_roadmap_results(roadmap_list, target_language):
     except Exception as e:
         logger.error(f"Error translating roadmap results: {str(e)}")
         return roadmap_list  # Return original if translation fails
+def translate_roadmap_results_with_gemini(roadmap_list, target_language):
+    """
+    Translate roadmap results to the target language using Gemini
+    
+    Args:
+        roadmap_list: List of roadmap items to translate
+        target_language: Target language code
+        
+    Returns:
+        Translated roadmap list
+    """
+    try:
+        logger.info(f"Translating roadmap results to {target_language} using Gemini")
+        
+        # Create copies to avoid modifying originals
+        translated_results = copy.deepcopy(roadmap_list)
+        
+        # Extract all text fields for batch translation
+        all_fields = []
+        field_mappings = []  # [(item_index, field_path), ...]
+        
+        for item_idx, item in enumerate(translated_results):
+            if "place" in item:
+                place = item["place"]
+                
+                # Name
+                if "name" in place and isinstance(place["name"], str) and place["name"]:
+                    all_fields.append(place["name"])
+                    field_mappings.append((item_idx, ["place", "name"]))
+                
+                # Description
+                if "description" in place and isinstance(place["description"], str) and place["description"]:
+                    all_fields.append(place["description"])
+                    field_mappings.append((item_idx, ["place", "description"]))
+                
+                # Location - City
+                if "location" in place and "city" in place["location"] and isinstance(place["location"]["city"], str) and place["location"]["city"]:
+                    all_fields.append(place["location"]["city"])
+                    field_mappings.append((item_idx, ["place", "location", "city"]))
+                
+                # Location - Country
+                if "location" in place and "country" in place["location"] and isinstance(place["location"]["country"], str) and place["location"]["country"]:
+                    all_fields.append(place["location"]["country"])
+                    field_mappings.append((item_idx, ["place", "location", "country"]))
+                
+                # Tags
+                if "tags" in place and isinstance(place["tags"], list):
+                    for tag_idx, tag in enumerate(place["tags"]):
+                        if isinstance(tag, str) and tag:
+                            all_fields.append(tag)
+                            field_mappings.append((item_idx, ["place", "tags", tag_idx]))
+                
+                # Category
+                if "category" in place and isinstance(place["category"], str) and place["category"]:
+                    all_fields.append(place["category"])
+                    field_mappings.append((item_idx, ["place", "category"]))
+                
+                # Accessibility
+                if "accessibility" in place and isinstance(place["accessibility"], list):
+                    for acc_idx, feature in enumerate(place["accessibility"]):
+                        if isinstance(feature, str) and feature:
+                            all_fields.append(feature)
+                            field_mappings.append((item_idx, ["place", "accessibility", acc_idx]))
+                
+                # Appropriate time
+                if "appropriate_time" in place and isinstance(place["appropriate_time"], list):
+                    for time_idx, month in enumerate(place["appropriate_time"]):
+                        if isinstance(month, str) and month:
+                            all_fields.append(month)
+                            field_mappings.append((item_idx, ["place", "appropriate_time", time_idx]))
+            
+            # Next destination
+            if "next_destination" in item and isinstance(item["next_destination"], str) and item["next_destination"]:
+                all_fields.append(item["next_destination"])
+                field_mappings.append((item_idx, ["next_destination"]))
+        
+        # Perform batch translation using asyncio
+        loop = asyncio.get_event_loop()
+        translated_fields = loop.run_until_complete(
+            batch_translate_with_gemini(all_fields, "en", target_language)
+        )
+        
+        # Update the original data with translations
+        for idx, (item_idx, field_path) in enumerate(field_mappings):
+            item = translated_results[item_idx]
+            
+            # Navigate to the correct nested object
+            target = item
+            for i in range(len(field_path) - 1):
+                path_part = field_path[i]
+                if isinstance(path_part, int):
+                    target = target[field_path[i-1]][path_part]
+                else:
+                    target = target[path_part]
+            
+            # Update the field
+            last_part = field_path[-1]
+            if isinstance(last_part, int):
+                parent_field = field_path[-2]
+                target[parent_field][last_part] = translated_fields[idx]
+            else:
+                target[last_part] = translated_fields[idx]
+        
+        logger.info(f"Translated {len(all_fields)} fields in roadmap using Gemini")
+        return translated_results
+        
+    except Exception as e:
+        logger.error(f"Error translating roadmap with Gemini: {str(e)}")
+        # Fallback to standard translation
+        return translate_roadmap_results(roadmap_list, target_language)
 
+        
 # Define DummyNLP in global scope for fallback
 class DummyNLP:
     def __init__(self):

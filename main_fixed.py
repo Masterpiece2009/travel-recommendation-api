@@ -200,9 +200,9 @@ def translate_to_english(text):
         logger.warning(f"Translation failed: {e}")
         return text  # Return original if translation fails
 
-async def translate_with_gemini(text, source_lang="en", target_lang="ar"):
+def translate_with_gemini(text, source_lang, target_lang):
     """
-    Translate text using Gemini API
+    Translate text using Google's Gemini API
     
     Args:
         text: Text to translate
@@ -210,68 +210,60 @@ async def translate_with_gemini(text, source_lang="en", target_lang="ar"):
         target_lang: Target language code
         
     Returns:
-        Translated text or original if translation fails
+        Translated text
     """
+    if not text or not isinstance(text, str) or text.strip() == "":
+        return text
+        
+    # Check if we've already translated this text
+    text_hash = hashlib.md5(str(text).encode()).hexdigest()
+    cache_key = f"gemini_translate_{source_lang}_{target_lang}_{text_hash}"
+    cache_result = translation_cache.find_one({"key": cache_key})
+    
+    if cache_result:
+        logger.info(f"Using cached Gemini translation from {source_lang} to {target_lang}")
+        return cache_result["translated_text"]
+    
     try:
-        if not text or len(str(text).strip()) == 0 or source_lang == target_lang:
-            return text
-            
-        # Create a consistent hash for cache key
-        text_hash = hashlib.md5(str(text).encode()).hexdigest()
-        cache_key = f"gemini_translate_{source_lang}_{target_lang}_{text_hash}"
-        
-        # Check if we have translation in cache
-        cache_result = translation_cache.find_one({"key": cache_key})
-        
-        if cache_result:
-            logger.info(f"Using cached Gemini translation to {target_lang}")
-            return cache_result["translated_text"]
-        
-        # Create optimized prompt for travel domain
-        prompt = f"""
-        Translate the following travel-related text from {source_lang} to {target_lang}. 
-        This is for a travel recommendation system. Maintain proper nouns like landmark names.
-        Only return the translation without any explanations or additional text.
-
-        Text to translate: "{text}"
-        """
-        
-        # Generate response using Gemini
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(prompt)
-        
-        if response.text:
-            translated = response.text.strip()
-            
-            # Cache the translation result
-            translation_cache.insert_one({
-                "key": cache_key,
-                "original_text": text,
-                "translated_text": translated,
-                "source_lang": source_lang,
-                "target_lang": target_lang,
-                "translator": "gemini",
-                "timestamp": datetime.now()
-            })
-            
-            logger.info(f"Translated text from {source_lang} to {target_lang} using Gemini")
-            return translated
-        else:
-            # Fallback to existing translation
-            logger.warning(f"Empty response from Gemini API, falling back to standard translation")
+        model = initialize_gemini_api()
+        if not model:
+            # Fallback to standard translation if Gemini is not available
             if source_lang == "en":
                 return translate_from_english(text, target_lang)
             else:
-                return translate_to_english(text)
-            
+                return translate_to_english(text, source_lang)
+        
+        # Formulate the translation prompt
+        prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text: \"{text}\""
+        
+        # Generate translation
+        response = model.generate_content(prompt)
+        
+        # Extract translated text
+        translated_text = response.text.strip()
+        
+        # Remove quotes if they were added by the model
+        if translated_text.startswith('"') and translated_text.endswith('"'):
+            translated_text = translated_text[1:-1]
+        
+        # Cache the result
+        translation_cache.insert_one({
+            "key": cache_key,
+            "original_text": text,
+            "translated_text": translated_text,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "timestamp": datetime.datetime.utcnow()
+        })
+        
+        return translated_text
     except Exception as e:
-        logger.warning(f"Gemini translation from {source_lang} to {target_lang} failed: {e}")
-        # Fallback to existing translation
+        logger.warning(f"Gemini translation from {source_lang} to {target_lang} failed: {str(e)}")
+        # Fallback to standard translation
         if source_lang == "en":
             return translate_from_english(text, target_lang)
         else:
-            return translate_to_english(text)
-
+            return translate_to_english(text, source_lang)
 async def batch_translate_with_gemini(items, source_lang="en", target_lang="ar"):
     """
     Translate multiple text items at once using Gemini API

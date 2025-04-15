@@ -914,10 +914,18 @@ def initialize_gemini_api():
             logger.warning("GEMINI_API_KEY not set, Gemini translation will not be available")
             return None
             
-        # Use the stable API version
+        # Configure the generation client with your API key
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro')
-        return model
+        
+        # Try the base model name instead of gemini-pro
+        try:
+            model = genai.GenerativeModel('gemini')
+            logger.info("Successfully initialized Gemini model")
+            return model
+        except Exception as model_error:
+            logger.warning(f"Could not initialize Gemini model: {str(model_error)}")
+            return None
+            
     except Exception as e:
         logger.error(f"Error initializing Gemini API: {str(e)}")
         return None

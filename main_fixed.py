@@ -235,7 +235,142 @@ async def translate_with_gemini(text, source_lang="en", target_lang="ar"):
         else:
             return translate_to_english(text)
 
+async def batch_translate_with_gemini(items, source_lang="en", target_lang="ar"):
+    """
+    Translate multiple text items at once using Gemini API
+    
+    Args:
+        items: List of text items to translate
+        source_lang: Source language code
+        target_lang: Target language code
+        
+    Returns:
+        List of translated texts
+    """
+    try:
+        if not items:
+            return []
             
+        # Filter out empty items
+        filtered_items = [(i, item) for i, item in enumerate(items) if item and len(str(item).strip()) > 0]
+        if not filtered_items:
+            return items
+            
+        # Check cache first for all items
+        result = items.copy()
+        remaining_items = []
+        remaining_indices = []
+        
+        for idx, text in filtered_items:
+            text_hash = hashlib.md5(str(text).encode()).hexdigest()
+            cache_key = f"gemini_translate_{source_lang}_{target_lang}_{text_hash}"
+            cache_result = translation_cache.find_one({"key": cache_key})
+            
+            if cache_result:
+                result[idx] = cache_result["translated_text"]
+                logger.info(f"Using cached Gemini translation to {target_lang}")
+            else:
+                remaining_items.append(text)
+                remaining_indices.append(idx)
+        
+        # If all items were in cache, return early
+        if not remaining_items:
+            return result
+            
+        # Create batch translate prompt
+        batch_size = 10  # Process in smaller batches to avoid token limits
+        
+        for i in range(0, len(remaining_items), batch_size):
+            batch = remaining_items[i:i+batch_size]
+            batch_indices = remaining_indices[i:i+batch_size]
+            
+            # Create optimized prompt for batch translation
+            items_json = json.dumps(batch, ensure_ascii=False)
+            prompt = f"""
+            Translate the following array of travel-related texts from {source_lang} to {target_lang}.
+            This is for a travel recommendation system. Maintain proper nouns like landmark names.
+            Return only a valid JSON array containing the translations in the same order.
+            
+            Items to translate: {items_json}
+            """
+            
+            # Generate response using Gemini
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(prompt)
+            
+            if response.text:
+                try:
+                    # Clean response text to extract valid JSON
+                    clean_response = response.text.strip()
+                    
+                    # Remove markdown code blocks if present
+                    if clean_response.startswith("```json"):
+                        clean_response = clean_response.replace("```json", "").replace("```", "").strip()
+                    elif clean_response.startswith("```"):
+                        clean_response = clean_response.replace("```", "").strip()
+                    
+                    # Parse JSON response
+                    translations = json.loads(clean_response)
+                    
+                    if len(translations) == len(batch):
+                        # Update result and cache
+                        for j, (idx, text, translation) in enumerate(zip(batch_indices, batch, translations)):
+                            result[idx] = translation
+                            
+                            # Cache the translation
+                            text_hash = hashlib.md5(str(text).encode()).hexdigest()
+                            cache_key = f"gemini_translate_{source_lang}_{target_lang}_{text_hash}"
+                            
+                            translation_cache.insert_one({
+                                "key": cache_key,
+                                "original_text": text,
+                                "translated_text": translation,
+                                "source_lang": source_lang,
+                                "target_lang": target_lang,
+                                "translator": "gemini",
+                                "timestamp": datetime.now()
+                            })
+                            
+                        logger.info(f"Batch translated {len(batch)} items from {source_lang} to {target_lang} using Gemini")
+                    else:
+                        # Fallback for count mismatch
+                        logger.warning(f"Gemini returned {len(translations)} translations for {len(batch)} items - using individual translation")
+                        for j, (idx, text) in enumerate(zip(batch_indices, batch)):
+                            if source_lang == "en":
+                                result[idx] = translate_from_english(text, target_lang)
+                            else:
+                                result[idx] = translate_to_english(text)
+                except json.JSONDecodeError:
+                    # Fallback for invalid JSON
+                    logger.warning(f"Invalid JSON response from Gemini - using individual translation")
+                    for idx, text in zip(batch_indices, batch):
+                        if source_lang == "en":
+                            result[idx] = translate_from_english(text, target_lang)
+                        else:
+                            result[idx] = translate_to_english(text)
+            else:
+                # Fallback for empty response
+                logger.warning(f"Empty response from Gemini API - using individual translation")
+                for idx, text in zip(batch_indices, batch):
+                    if source_lang == "en":
+                        result[idx] = translate_from_english(text, target_lang)
+                    else:
+                        result[idx] = translate_to_english(text)
+                        
+        return result
+    except Exception as e:
+        logger.error(f"Batch translation error: {str(e)}")
+        # Fallback to original translation methods
+        result = items.copy()
+        for i, item in enumerate(items):
+            if item and len(str(item).strip()) > 0:
+                if source_lang == "en":
+                    result[i] = translate_from_english(item, target_lang)
+                else:
+                    result[i] = translate_to_english(item)
+        return result
+
+        
 def translate_roadmap_results(roadmap_list, target_language):
     """
     Translate roadmap results to the target language

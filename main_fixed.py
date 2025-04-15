@@ -235,18 +235,14 @@ def translate_with_gemini(text, source_lang, target_lang):
         # Direct content generation approach
         prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text without quotes: \"{text}\""
         
-        # Use the model we know works
+        # Use only the flash model that works
         model_name = "models/gemini-1.5-flash-latest"
         
-        try:
-            logger.info(f"Using translation model: {model_name}")
-            gen_model = genai.GenerativeModel(model_name)
-            response = gen_model.generate_content(prompt)
-            translated_text = response.text.strip()
-            logger.info(f"Successfully used model: {model_name}")
-        except Exception as e:
-            logger.warning(f"Model {model_name} failed: {str(e)}")
-            raise Exception(f"Translation failed with model {model_name}: {str(e)}")
+        logger.info(f"Using translation model: {model_name}")
+        gen_model = genai.GenerativeModel(model_name)
+        response = gen_model.generate_content(prompt)
+        translated_text = response.text.strip()
+        logger.info(f"Successfully used model: {model_name}")
         
         # Remove quotes if they were added by the model
         if translated_text.startswith('"') and translated_text.endswith('"'):

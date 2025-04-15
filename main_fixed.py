@@ -4595,6 +4595,7 @@ async def clear_search_history(user_id: str):
 
 @app.get("/roadmap/{user_id}", response_model=Dict)
 async def get_roadmap(
+    user_id: str,
     request: RoadmapRequest = Depends(),
     language: str = None,
     use_gemini: bool = False
@@ -4603,10 +4604,22 @@ async def get_roadmap(
     Get a travel roadmap for a user
     """
     try:
-        # ... existing code ...
+        # First, make sure roadmap_list is defined
+        # Get the roadmap data from cache or generate it
+        cached_roadmap = roadmaps_collection.find_one({"user_id": user_id})
         
-        # Translate roadmap if requested
-        if language:
+        if cached_roadmap and "roadmap_data" in cached_roadmap:
+            roadmap_data = cached_roadmap["roadmap_data"]
+            # Convert to list format
+            roadmap_list = simplify_roadmap_to_list(roadmap_data)
+        else:
+            # Generate new roadmap
+            roadmap_data = generate_hybrid_roadmap(user_id)
+            # Convert to list format
+            roadmap_list = simplify_roadmap_to_list(roadmap_data)
+        
+        # THEN translate roadmap if requested
+        if language and roadmap_list:
             logger.info(f"Translating roadmap to {language}{' using Gemini' if use_gemini else ''}")
             if use_gemini:
                 # Use Gemini translation
@@ -4615,7 +4628,12 @@ async def get_roadmap(
                 # Use standard translation
                 roadmap_list = translate_roadmap_results(roadmap_list, language)
         
-        # ... rest of existing code ...
+        return {
+            "success": True,
+            "user_id": user_id,
+            "count": len(roadmap_list) if roadmap_list else 0,
+            "data": roadmap_list
+        }
                 
     except Exception as e:
         logger.error(f"Error getting roadmap: {str(e)}")

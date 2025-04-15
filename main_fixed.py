@@ -4521,50 +4521,32 @@ async def clear_search_history(user_id: str):
             content={"success": False, "error": str(e)}
         )
 
-# --- Roadmap API Endpoints ---
-@app.get("/roadmap/{user_id}")
-async def get_roadmap(user_id: str, language: str = None, use_gemini: bool = True):
+@app.get("/roadmap/{user_id}", response_model=Dict)
+async def get_roadmap(
+    request: RoadmapRequest = Depends(),
+    language: str = None,
+    use_gemini: bool = False
+):
     """
-    Get a travel roadmap for a specific user
-    
-    Uses caching: Only regenerates if user's travel preferences have changed
-    Optional language parameter for translation
-    Optional use_gemini parameter to select translation service
+    Get a travel roadmap for a user
     """
     try:
-        logger.info(f"Roadmap request for user {user_id}")
+        # ... existing code ...
         
-        # Get roadmap (cached or newly generated)
-        roadmap_data = await get_roadmap_with_caching(user_id)
-        
-        # Simplify to list format
-        simplified_list = simplify_roadmap_to_list(roadmap_data)
-        
-        # Translate if language parameter is provided
+        # Translate roadmap if requested
         if language:
-            logger.info(f"Translating roadmap to {language} using {'Gemini' if use_gemini else 'standard translation'}")
-            
+            logger.info(f"Translating roadmap to {language}{' using Gemini' if use_gemini else ''}")
             if use_gemini:
-                # Use Gemini translation for potentially better quality
-                simplified_list = translate_roadmap_results_with_gemini(simplified_list, language)
+                # Use Gemini translation
+                roadmap_list = translate_roadmap_results_with_gemini(roadmap_list, language)
             else:
-                # Use original translation method as fallback
-                simplified_list = translate_roadmap_results(simplified_list, language)
+                # Use standard translation
+                roadmap_list = translate_roadmap_results(roadmap_list, language)
         
-        return {
-            "success": True, 
-            "user_id": user_id, 
-            "count": len(simplified_list),
-            "data": simplified_list,
-            "metadata": {
-                "budget_level": roadmap_data.get("budget_level"),
-                "group_type": roadmap_data.get("group_type"),
-                "start_date": roadmap_data.get("start_date"),
-                "accessibility_needs": roadmap_data.get("accessibility_needs", [])
-            }
-        }
+        # ... rest of existing code ...
+                
     except Exception as e:
-        logger.error(f"Error generating roadmap: {str(e)}")
+        logger.error(f"Error getting roadmap: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}

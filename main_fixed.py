@@ -398,6 +398,30 @@ for collection_name in ["recommendations_cache", "shown_places", "roadmaps", "ca
     except Exception as e:
         logger.error(f"❌ Error creating index on {collection_name}: {e}")
 
+import os
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+def initialize_gemini_api():
+    """Initialize the Gemini API with the API key from environment variables"""
+    try:
+        # Try to load from .env file if present
+        load_dotenv()
+        
+        # Get API key from environment variable
+        api_key = os.environ.get("GEMINI_API_KEY")
+        
+        if not api_key:
+            logger.warning("GEMINI_API_KEY not found in environment variables")
+            return False
+        
+        # Configure Gemini
+        genai.configure(api_key=api_key)
+        logger.info("Gemini API initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error initializing Gemini API: {str(e)}")
+        return False
 # --- Initialize spaCy model ---
 def load_spacy_model(model="en_core_web_md", retries=2):  # Use medium model by default
     """Attempts to load the spaCy model with better vector checking."""

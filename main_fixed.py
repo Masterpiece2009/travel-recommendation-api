@@ -4398,7 +4398,8 @@ async def search_places(
     query: str = Query(..., min_length=1),
     limit: int = Query(10, ge=1, le=50),
     translate_results: bool = Query(False, description="Whether to translate results back to the query language"),
-    language: Optional[str] = Query(None, description="Override detected language")
+    language: Optional[str] = Query(None, description="Override detected language"),
+    use_gemini: bool = Query(True, description="Whether to use Gemini for translation")
 ):
     """
     Search for places based on a text query with language support
@@ -4409,6 +4410,7 @@ async def search_places(
         limit: Maximum number of results to return
         translate_results: Whether to translate results back to the query language
         language: Override automatically detected language
+        use_gemini: Whether to use Gemini for translation (higher quality but may be slower)
     """
     try:
         # Store original query
@@ -4420,7 +4422,13 @@ async def search_places(
         # Translate query to English if needed
         if detected_language != 'en':
             # Translate query to English for better matching
-            translated_query = translate_to_english(query)
+            if use_gemini:
+                # Use Gemini for potentially better translation
+                translated_query = await translate_with_gemini(query, detected_language, "en")
+            else:
+                # Use standard translation
+                translated_query = translate_to_english(query)
+                
             logger.info(f"Translated search query from '{original_query}' ({detected_language}) to '{translated_query}'")
             query = translated_query
         
@@ -4555,33 +4563,81 @@ async def search_places(
         
         # Translate results back to original language if requested
         if translate_results and detected_language not in ['en', 'und'] and len(final_results) > 0:
-            translated_results = []
-            
-            for place in final_results:
-                # Create a copy of the place to modify
-                translated_place = dict(place)
+            # Use batch translation for better performance when possible
+            if use_gemini:
+                # Extract all fields for batch translation
+                all_fields = []
+                field_mappings = []  # [(place_idx, field_name), (place_idx, ['tags', tag_idx]), ...]
                 
-                # Translate key fields
-                if "name" in place:
-                    translated_place["name"] = translate_from_english(place["name"], detected_language)
+                for place_idx, place in enumerate(final_results):
+                    # Name
+                    if "name" in place:
+                        all_fields.append(place["name"])
+                        field_mappings.append((place_idx, "name"))
                     
-                if "description" in place:
-                    translated_place["description"] = translate_from_english(place["description"], detected_language)
+                    # Description
+                    if "description" in place:
+                        all_fields.append(place["description"])
+                        field_mappings.append((place_idx, "description"))
                     
-                if "category" in place:
-                    translated_place["category"] = translate_from_english(place["category"], detected_language)
+                    # Category
+                    if "category" in place:
+                        all_fields.append(place["category"])
+                        field_mappings.append((place_idx, "category"))
                     
-                # Translate tags if present
-                if "tags" in place and isinstance(place["tags"], list):
-                    translated_place["tags"] = [
-                        translate_from_english(tag, detected_language) 
-                        for tag in place["tags"]
-                    ]
+                    # Tags
+                    if "tags" in place and isinstance(place["tags"], list):
+                        for tag_idx, tag in enumerate(place["tags"]):
+                            if tag:
+                                all_fields.append(tag)
+                                field_mappings.append((place_idx, ["tags", tag_idx]))
                 
-                translated_results.append(translated_place)
+                # Perform batch translation using asyncio
+                if all_fields:
+                    loop = asyncio.get_event_loop()
+                    translated_fields = loop.run_until_complete(
+                        batch_translate_with_gemini(all_fields, "en", detected_language)
+                    )
+                    
+                    # Update results with translations
+                    for i, (place_idx, field_id) in enumerate(field_mappings):
+                        if isinstance(field_id, str):
+                            # For top-level fields like name, description
+                            final_results[place_idx][field_id] = translated_fields[i]
+                        else:
+                            # For nested fields like tags[i]
+                            final_results[place_idx][field_id[0]][field_id[1]] = translated_fields[i]
+                    
+                    logger.info(f"Batch translated {len(all_fields)} fields to {detected_language} using Gemini")
+            else:
+                # Use individual translation (original approach)
+                translated_results = []
                 
-            final_results = translated_results
-            logger.info(f"Translated {len(final_results)} results to {detected_language}")
+                for place in final_results:
+                    # Create a copy of the place to modify
+                    translated_place = dict(place)
+                    
+                    # Translate key fields
+                    if "name" in place:
+                        translated_place["name"] = translate_from_english(place["name"], detected_language)
+                        
+                    if "description" in place:
+                        translated_place["description"] = translate_from_english(place["description"], detected_language)
+                        
+                    if "category" in place:
+                        translated_place["category"] = translate_from_english(place["category"], detected_language)
+                        
+                    # Translate tags if present
+                    if "tags" in place and isinstance(place["tags"], list):
+                        translated_place["tags"] = [
+                            translate_from_english(tag, detected_language) 
+                            for tag in place["tags"]
+                        ]
+                    
+                    translated_results.append(translated_place)
+                    
+                final_results = translated_results
+                logger.info(f"Translated {len(final_results)} results to {detected_language}")
         
         # Include translation info in response
         return {
@@ -4592,7 +4648,8 @@ async def search_places(
             "detected_language": detected_language,
             "count": len(final_results),
             "results": final_results,
-            "translated_results": translate_results and detected_language not in ['en', 'und']
+            "translated_results": translate_results and detected_language not in ['en', 'und'],
+            "translation_service": "gemini" if use_gemini else "standard"
         }
         
     except Exception as e:

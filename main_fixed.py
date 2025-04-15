@@ -268,14 +268,14 @@ def translate_with_gemini(text, source_lang, target_lang):
         if translated_text.startswith('"') and translated_text.endswith('"'):
             translated_text = translated_text[1:-1]
         
-        # Cache the result
+        # Cache the result - FIXED datetime issue
         translation_cache.insert_one({
             "key": cache_key,
             "original_text": text,
             "translated_text": translated_text,
             "source_lang": source_lang,
             "target_lang": target_lang,
-            "timestamp": datetime.datetime.utcnow()
+            "timestamp": datetime.utcnow()  # Fixed: uses datetime.utcnow() not datetime.datetime.utcnow()
         })
         
         return translated_text

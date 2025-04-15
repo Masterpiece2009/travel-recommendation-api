@@ -4180,27 +4180,47 @@ async def health_check():
         )
 @app.get("/recommendations/{user_id}", response_model=Dict)
 async def get_recommendations(
-    request: RecommendationRequest = Depends(),
-    translate_results: bool = False,
+    user_id: str,
     language: str = None,
-    use_gemini: bool = False
+    use_gemini: bool = False,
+    translate_results: bool = True  # Default to True to make it work with your URL
 ):
     """
     Get travel recommendations for a user
     """
     try:
-        # ... existing code ...
+        # Get user preferences or set defaults if none
+        user = db.users.find_one({"id": user_id})
+        if not user:
+            return JSONResponse(
+                status_code=404, 
+                content={"success": False, "error": f"User {user_id} not found"}
+            )
+            
+        # Generate recommendations
+        recommendations = generate_recommendations(user_id)
         
         # Translate results if requested
-        if translate_results and language:
-            if use_gemini:
-                # Use Gemini translation
-                recommendations = translate_recommendations_with_gemini(recommendations, language)
-            else:
-                # Use standard translation
-                recommendations = translate_recommendation_results(recommendations, language)
+        if translate_results and language and language != "en":
+            try:
+                if use_gemini:
+                    # Use Gemini translation
+                    recommendations = translate_recommendations_with_gemini(recommendations, language)
+                else:
+                    # Use standard translation
+                    recommendations = translate_recommendation_results(recommendations, language)
+            except Exception as e:
+                logger.error(f"Translation error: {str(e)}")
+                # Continue with untranslated recommendations
         
-        # ... rest of existing code ...
+        # Wrap in dictionary to match response_model=Dict
+        response = {
+            "success": True,
+            "recommendations": recommendations
+        }
+        
+        # Return the wrapped dictionary
+        return response
                 
     except Exception as e:
         logger.error(f"Error getting recommendations: {str(e)}")

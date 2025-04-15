@@ -84,7 +84,23 @@ def detect_language(text):
     except Exception as e:
         logger.warning(f"Language detection failed: {e}")
         return "en"  # Default to English if detection fails
-
+def get_language_name(language_code):
+    """Get the full language name from a language code"""
+    language_names = {
+        "en": "English",
+        "ar": "Arabic",
+        "fr": "French",
+        "es": "Spanish",
+        "de": "German",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "ru": "Russian",
+        "zh": "Chinese",
+        "ja": "Japanese",
+        "ko": "Korean",
+        # Add more languages as needed
+    }
+    return language_names.get(language_code, language_code)
 def translate_from_english(text, target_lang):
     """
     Translate text from English to target language.

@@ -586,7 +586,103 @@ def translate_search_results_with_gemini(results, target_language):
         logger.error(f"Error translating search results with Gemini: {str(e)}")
         # Fallback to standard translation
         return translate_search_results(results, target_language)
+def translate_recommendations_with_gemini(results, target_language):
+    """
+    Translate recommendation results to the target language using Gemini
+    
+    Args:
+        results: List of recommendation result items to translate
+        target_language: Target language code
         
+    Returns:
+        Translated recommendation results list
+    """
+    try:
+        logger.info(f"Translating recommendation results to {target_language} using Gemini")
+        
+        # Create copies to avoid modifying originals
+        translated_results = copy.deepcopy(results)
+        
+        # Extract all text fields for batch translation
+        all_fields = []
+        field_mappings = []  # [(item_index, field_name), ...]
+        
+        for item_idx, item in enumerate(translated_results):
+            # Name
+            if "name" in item and isinstance(item["name"], str) and item["name"]:
+                all_fields.append(item["name"])
+                field_mappings.append((item_idx, "name"))
+            
+            # Description
+            if "description" in item and isinstance(item["description"], str) and item["description"]:
+                all_fields.append(item["description"])
+                field_mappings.append((item_idx, "description"))
+            
+            # Location - City
+            if "location" in item and "city" in item["location"] and isinstance(item["location"]["city"], str) and item["location"]["city"]:
+                all_fields.append(item["location"]["city"])
+                field_mappings.append((item_idx, "location.city"))
+            
+            # Location - Country
+            if "location" in item and "country" in item["location"] and isinstance(item["location"]["country"], str) and item["location"]["country"]:
+                all_fields.append(item["location"]["country"])
+                field_mappings.append((item_idx, "location.country"))
+            
+            # Category
+            if "category" in item and isinstance(item["category"], str) and item["category"]:
+                all_fields.append(item["category"])
+                field_mappings.append((item_idx, "category"))
+            
+            # Reason
+            if "reason" in item and isinstance(item["reason"], str) and item["reason"]:
+                all_fields.append(item["reason"])
+                field_mappings.append((item_idx, "reason"))
+                
+            # Tags (if present)
+            if "tags" in item and isinstance(item["tags"], list):
+                for tag_idx, tag in enumerate(item["tags"]):
+                    if isinstance(tag, str) and tag:
+                        all_fields.append(tag)
+                        field_mappings.append((item_idx, f"tags.{tag_idx}"))
+        
+        # Use individual translations
+        translated_fields = []
+        for field in all_fields:
+            translated_fields.append(translate_with_gemini(field, "en", target_language))
+        
+        # Update the original data with translations
+        for idx, (item_idx, field_path) in enumerate(field_mappings):
+            if idx >= len(translated_fields):
+                continue
+                
+            # Get the item to modify
+            item = translated_results[item_idx]
+            
+            try:
+                # Handle different field path patterns
+                if "." in field_path:
+                    parts = field_path.split(".")
+                    if parts[0] == "location" and parts[1] in ["city", "country"]:
+                        # Handle location.city or location.country
+                        item["location"][parts[1]] = translated_fields[idx]
+                    elif parts[0] == "tags" and parts[1].isdigit():
+                        # Handle tags[index]
+                        tag_idx = int(parts[1])
+                        if "tags" in item and len(item["tags"]) > tag_idx:
+                            item["tags"][tag_idx] = translated_fields[idx]
+                else:
+                    # Handle direct properties
+                    item[field_path] = translated_fields[idx]
+            except Exception as e:
+                logger.warning(f"Error updating translated field at path {field_path}: {str(e)}")
+        
+        logger.info(f"Translated {len(all_fields)} fields in recommendation results using Gemini")
+        return translated_results
+        
+    except Exception as e:
+        logger.error(f"Error translating recommendation results with Gemini: {str(e)}")
+        # Fallback to standard translation
+        return translate_recommendation_results(results, target_language)        
 # Define DummyNLP in global scope for fallback
 class DummyNLP:
     def __init__(self):

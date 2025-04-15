@@ -820,25 +820,20 @@ else:
     logger.warning("⚠️ WARNING: NLP Model doesn't have word vectors - semantic search will use fallback algorithm")
 
 def initialize_gemini_api():
-    """Initialize the Gemini API with the API key from environment variables"""
+    """Initialize Gemini API client"""
     try:
-        # Try to load from .env file if present
-        load_dotenv()
-        
-        # Get API key from environment variable
-        api_key = os.environ.get("GEMINI_API_KEY")
-        
+        api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            logger.warning("GEMINI_API_KEY not found in environment variables")
-            return False
-        
-        # Configure Gemini
+            logger.warning("GEMINI_API_KEY not set, Gemini translation will not be available")
+            return None
+            
+        # Use the stable API version
         genai.configure(api_key=api_key)
-        logger.info("Gemini API initialized successfully")
-        return True
+        model = genai.GenerativeModel('gemini-pro')
+        return model
     except Exception as e:
         logger.error(f"Error initializing Gemini API: {str(e)}")
-        return False
+        return None
 # Initialize FastAPI app
 app = FastAPI(
     title="Travel API",

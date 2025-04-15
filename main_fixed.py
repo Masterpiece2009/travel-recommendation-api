@@ -550,11 +550,35 @@ def translate_roadmap_results_with_gemini(roadmap_list, target_language):
                 all_fields.append(item["next_destination"])
                 field_mappings.append((item_idx, ["next_destination"]))
         
-        # Perform batch translation using asyncio
-        loop = asyncio.get_event_loop()
-        translated_fields = loop.run_until_complete(
-            batch_translate_with_gemini(all_fields, "en", target_language)
-        )
+        # Perform batch translation - handle event loop in a way that works in the existing context
+        try:
+            # Try to get the current event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If the loop is already running, we need a different approach
+                # Use synchronous approach since we're in an event loop already
+                translated_fields = []
+                for field in all_fields:
+                    # Use cache check first
+                    text_hash = hashlib.md5(str(field).encode()).hexdigest()
+                    cache_key = f"gemini_translate_en_{target_language}_{text_hash}"
+                    cache_result = translation_cache.find_one({"key": cache_key})
+                    
+                    if cache_result:
+                        logger.info(f"Using cached Gemini translation to {target_language}")
+                        translated_fields.append(cache_result["translated_text"])
+                    else:
+                        # Fallback to standard translation if we can't use async
+                        translated_fields.append(translate_from_english(field, target_language))
+            else:
+                # If the loop is not running, we can use it directly
+                translated_fields = loop.run_until_complete(
+                    batch_translate_with_gemini(all_fields, "en", target_language)
+                )
+        except RuntimeError:
+            # Fallback if we have event loop issues
+            logger.warning("Event loop issue, using standard translation")
+            translated_fields = [translate_from_english(field, target_language) for field in all_fields]
         
         # Update the original data with translations
         for idx, (item_idx, field_path) in enumerate(field_mappings):
@@ -584,7 +608,6 @@ def translate_roadmap_results_with_gemini(roadmap_list, target_language):
         logger.error(f"Error translating roadmap with Gemini: {str(e)}")
         # Fallback to standard translation
         return translate_roadmap_results(roadmap_list, target_language)
-
         
 # Define DummyNLP in global scope for fallback
 class DummyNLP:

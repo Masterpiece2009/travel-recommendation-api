@@ -4686,12 +4686,13 @@ async def clear_search_history(user_id: str):
 
 # --- Roadmap API Endpoints ---
 @app.get("/roadmap/{user_id}")
-async def get_roadmap(user_id: str, language: str = None):
+async def get_roadmap(user_id: str, language: str = None, use_gemini: bool = True):
     """
     Get a travel roadmap for a specific user
     
     Uses caching: Only regenerates if user's travel preferences have changed
     Optional language parameter for translation
+    Optional use_gemini parameter to select translation service
     """
     try:
         logger.info(f"Roadmap request for user {user_id}")
@@ -4704,8 +4705,14 @@ async def get_roadmap(user_id: str, language: str = None):
         
         # Translate if language parameter is provided
         if language:
-            logger.info(f"Translating roadmap to {language}")
-            simplified_list = translate_roadmap_results(simplified_list, language)
+            logger.info(f"Translating roadmap to {language} using {'Gemini' if use_gemini else 'standard translation'}")
+            
+            if use_gemini:
+                # Use Gemini translation for potentially better quality
+                simplified_list = translate_roadmap_results_with_gemini(simplified_list, language)
+            else:
+                # Use original translation method as fallback
+                simplified_list = translate_roadmap_results(simplified_list, language)
         
         return {
             "success": True, 

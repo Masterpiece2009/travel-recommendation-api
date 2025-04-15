@@ -224,26 +224,43 @@ def translate_with_gemini(text, source_lang, target_lang):
     cache_result = translation_cache.find_one({"key": cache_key})
     
     if cache_result:
-        logger.info(f"Using cached Gemini translation from {source_lang} to {target_lang}")
+        logger.info(f"Using cached translation to {target_lang}")
         return cache_result["translated_text"]
     
     try:
-        model = initialize_gemini_api()
-        if not model:
-            # Fallback to standard translation if Gemini is not available
-            if source_lang == "en":
-                return translate_from_english(text, target_lang)
-            else:
-                return translate_to_english(text, source_lang)
+        # Initialize the Gemini client
+        if not initialize_gemini_api():
+            raise Exception("Failed to initialize Gemini API")
         
-        # Formulate the translation prompt
-        prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text: \"{text}\""
+        # Direct content generation approach
+        prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text without quotes: \"{text}\""
         
-        # Generate translation
-        response = model.generate_content(prompt)
-        
-        # Extract translated text
-        translated_text = response.text.strip()
+        try:
+            # Try using a specific model - gemini-1.0-pro-latest is a safer choice
+            gen_model = genai.GenerativeModel("gemini-1.0-pro-latest")
+            response = gen_model.generate_content(prompt)
+            translated_text = response.text.strip()
+        except Exception as model_error:
+            logger.warning(f"Model 'gemini-1.0-pro-latest' failed: {str(model_error)}")
+            
+            try:
+                # Try alternative model names
+                for model_name in ["gemini-pro", "gemini", "gemini-1.0-pro", "models/gemini-pro"]:
+                    try:
+                        logger.info(f"Trying model: {model_name}")
+                        gen_model = genai.GenerativeModel(model_name)
+                        response = gen_model.generate_content(prompt)
+                        translated_text = response.text.strip()
+                        logger.info(f"Successfully used model: {model_name}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Model {model_name} failed: {str(e)}")
+                else:
+                    raise Exception("All model attempts failed")
+                    
+            except Exception as alternate_error:
+                logger.warning(f"All model attempts failed: {str(alternate_error)}")
+                raise Exception(f"Failed to use any available model: {str(alternate_error)}")
         
         # Remove quotes if they were added by the model
         if translated_text.startswith('"') and translated_text.endswith('"'):

@@ -205,7 +205,7 @@ def translate_to_english(text):
 
 def translate_with_gemini(text, source_lang, target_lang):
     """
-    Translate text using Google's Gemini API
+    Translate text using Google's Gemini API with immediate fallback when rate limited
     
     Args:
         text: Text to translate
@@ -235,30 +235,62 @@ def translate_with_gemini(text, source_lang, target_lang):
         # Direct content generation approach
         prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text without quotes: \"{text}\""
         
-        # Use only the flash model that works
-# Change this line in your function
-model_name = "models/gemini-1.5-flash-8b-latest"  # or "models/gemini-1.5-flash-8b" without latest        
-        logger.info(f"Using translation model: {model_name}")
-        gen_model = genai.GenerativeModel(model_name)
-        response = gen_model.generate_content(prompt)
-        translated_text = response.text.strip()
-        logger.info(f"Successfully used model: {model_name}")
+        # Try both models - first try the 8B model which may have higher limits
+        model_names = [
+            "models/gemini-1.5-flash-8b-latest",  # Try 8B model first (higher limit model)
+            "models/gemini-1.5-flash-latest"      # Fallback to regular flash model
+        ]
         
-        # Remove quotes if they were added by the model
-        if translated_text.startswith('"') and translated_text.endswith('"'):
-            translated_text = translated_text[1:-1]
+        translated_text = None
         
-        # Cache the result - FIXED datetime issue
-        translation_cache.insert_one({
-            "key": cache_key,
-            "original_text": text,
-            "translated_text": translated_text,
-            "source_lang": source_lang,
-            "target_lang": target_lang,
-            "timestamp": datetime.utcnow()  # Fixed: uses datetime.utcnow() not datetime.datetime.utcnow()
-        })
+        for model_name in model_names:
+            try:
+                logger.info(f"Using translation model: {model_name}")
+                gen_model = genai.GenerativeModel(model_name)
+                response = gen_model.generate_content(prompt)
+                translated_text = response.text.strip()
+                logger.info(f"Successfully used model: {model_name}")
+                
+                # Remove quotes if they were added by the model
+                if translated_text.startswith('"') and translated_text.endswith('"'):
+                    translated_text = translated_text[1:-1]
+                
+                # If we got here, translation succeeded, so exit the loop
+                break
+                
+            except Exception as e:
+                error_str = str(e)
+                if "quota" in error_str.lower():
+                    logger.warning(f"Rate limit hit for model {model_name}, trying next option")
+                    # Continue to next model or fallback
+                elif "not found" in error_str.lower():
+                    logger.warning(f"Model {model_name} not available, trying next option")
+                    # Continue to next model or fallback
+                else:
+                    logger.warning(f"Error using model {model_name}: {error_str}")
+                    # Continue to next model or fallback
         
-        return translated_text
+        # If we got a translation from any model, cache and return it
+        if translated_text:
+            # Cache the result - FIXED datetime issue
+            translation_cache.insert_one({
+                "key": cache_key,
+                "original_text": text,
+                "translated_text": translated_text,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "timestamp": datetime.utcnow()
+            })
+            
+            return translated_text
+        
+        # If we get here, all models failed, so use standard translation
+        logger.warning(f"All Gemini models failed, falling back to standard translation")
+        if source_lang == "en":
+            return translate_from_english(text, target_lang)
+        else:
+            return translate_to_english(text, source_lang)
+            
     except Exception as e:
         logger.warning(f"Gemini translation from {source_lang} to {target_lang} failed: {str(e)}")
         # Fallback to standard translation

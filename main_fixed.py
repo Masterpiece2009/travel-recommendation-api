@@ -4140,170 +4140,32 @@ async def health_check():
                 "error": str(e)
             }
         )
-@app.get("/recommendations/{user_id}")
+@@app.get("/recommendations/{user_id}", response_model=Dict)
 async def get_recommendations(
-    user_id: str,
-    num: int = Query(10, ge=1, le=50),
-    force_refresh: bool = Query(False),
-    translate_results: bool = Query(False, description="Whether to translate results to user's preferred language"),
-    language: Optional[str] = Query(None, description="Override language for translation"),
-    use_gemini: bool = Query(True, description="Whether to use Gemini for translation"),
-    background_tasks: BackgroundTasks = None
+    request: RecommendationRequest = Depends(),
+    translate_results: bool = False,
+    language: str = None,
+    use_gemini: bool = False
 ):
     """
-    Get recommendations for a user with progressive pagination and translation support.
-    First request: Return 10 new places
-    Second request: Return 10 new places + previous 10 = 20 total
-    Third request and beyond: Return 10 new places + 20 most recent shown places = 30 total
-    
-    Args:
-        user_id: User ID
-        num: Number of NEW recommendations to return (default 10)
-        force_refresh: Whether to force fresh recommendations
-        translate_results: Whether to translate results to user's preferred language
-        language: Override language for translation (if not specified, uses user's last search language)
-        use_gemini: Whether to use Gemini for translation (higher quality)
+    Get travel recommendations for a user
     """
     try:
-        # Get recommendations with the enhanced progressive pagination
-        recommendation_data = get_recommendations_with_caching(
-            user_id, 
-            force_refresh=force_refresh, 
-            num_new_recommendations=num
-        )
+        # ... existing code ...
         
-        # Combine new and previously shown recommendations
-        all_recommendations = recommendation_data["new_recommendations"] + recommendation_data["previously_shown"]
+        # Translate results if requested
+        if translate_results and language:
+            if use_gemini:
+                # Use Gemini translation
+                recommendations = translate_recommendations_with_gemini(recommendations, language)
+            else:
+                # Use standard translation
+                recommendations = translate_recommendation_results(recommendations, language)
         
-        # Check if we need to regenerate cache
-        if background_tasks:
-            cache_count = recommendations_cache_collection.count_documents({"user_id": user_id})
-            if cache_count < 4:
-                # Schedule cache regeneration in background
-                logger.info(f"Cache count low ({cache_count}), scheduling regeneration")
-                background_tasks.add_task(background_cache_recommendations, user_id, 6)
-        
-        # Handle translation if requested
-        target_language = language
-        translated = False
-        
-        if translate_results and len(all_recommendations) > 0:
-            # If language not specified, try to determine from user's search history
-            if not target_language:
-                # Get user's most recent search to determine language
-                recent_search = search_queries_collection.find_one(
-                    {"user_id": user_id},
-                    sort=[("timestamp", -1)]
-                )
+        # ... rest of existing code ...
                 
-                if recent_search and "detected_language" in recent_search:
-                    target_language = recent_search["detected_language"]
-            
-            # Only translate if target language is valid and not English
-            if target_language and target_language not in ['en', 'und']:
-                if use_gemini:
-                    # Use batch translation with Gemini for better performance
-                    all_fields = []
-                    field_mappings = []  # [(place_idx, field_name), (place_idx, ['tags', tag_idx]), ...]
-                    
-                    for place_idx, place in enumerate(all_recommendations):
-                        # Name
-                        if "name" in place and place["name"]:
-                            all_fields.append(place["name"])
-                            field_mappings.append((place_idx, "name"))
-                        
-                        # Description
-                        if "description" in place and place["description"]:
-                            all_fields.append(place["description"])
-                            field_mappings.append((place_idx, "description"))
-                        
-                        # Category
-                        if "category" in place and place["category"]:
-                            all_fields.append(place["category"])
-                            field_mappings.append((place_idx, "category"))
-                        
-                        # Tags
-                        if "tags" in place and isinstance(place["tags"], list):
-                            for tag_idx, tag in enumerate(place["tags"]):
-                                if tag:
-                                    all_fields.append(tag)
-                                    field_mappings.append((place_idx, ["tags", tag_idx]))
-                        
-                        # Location - City
-                        if "location" in place and "city" in place["location"] and place["location"]["city"]:
-                            all_fields.append(place["location"]["city"])
-                            field_mappings.append((place_idx, ["location", "city"]))
-                        
-                        # Location - Country
-                        if "location" in place and "country" in place["location"] and place["location"]["country"]:
-                            all_fields.append(place["location"]["country"])
-                            field_mappings.append((place_idx, ["location", "country"]))
-                    
-                    # Perform batch translation using asyncio
-                    if all_fields:
-                        loop = asyncio.get_event_loop()
-                        translated_fields = loop.run_until_complete(
-                            batch_translate_with_gemini(all_fields, "en", target_language)
-                        )
-                        
-                        # Update results with translations
-                        for i, (place_idx, field_id) in enumerate(field_mappings):
-                            if isinstance(field_id, str):
-                                # For top-level fields like name, description
-                                all_recommendations[place_idx][field_id] = translated_fields[i]
-                            else:
-                                # For nested fields like tags[i] or location.city
-                                if len(field_id) == 2:
-                                    all_recommendations[place_idx][field_id[0]][field_id[1]] = translated_fields[i]
-                        
-                        translated = True
-                        logger.info(f"Batch translated {len(all_fields)} fields to {target_language} using Gemini")
-                else:
-                    # Use original approach with individual translations
-                    translated_recommendations = []
-                    
-                    for place in all_recommendations:
-                        # Create a copy of the place to modify
-                        translated_place = dict(place)
-                        
-                        # Translate key fields
-                        if "name" in place:
-                            translated_place["name"] = translate_from_english(place["name"], target_language)
-                            
-                        if "description" in place:
-                            translated_place["description"] = translate_from_english(place["description"], target_language)
-                            
-                        if "category" in place:
-                            translated_place["category"] = translate_from_english(place["category"], target_language)
-                            
-                        # Translate tags if present
-                        if "tags" in place and isinstance(place["tags"], list):
-                            translated_place["tags"] = [
-                                translate_from_english(tag, target_language) 
-                                for tag in place["tags"]
-                            ]
-                        
-                        translated_recommendations.append(translated_place)
-                        
-                    all_recommendations = translated_recommendations
-                    translated = True
-                    logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
-        
-        # Return recommendations
-        return {
-            "success": True,
-            "user_id": user_id,
-            "count": len(all_recommendations),
-            "new_count": len(recommendation_data["new_recommendations"]),
-            "history_count": len(recommendation_data["previously_shown"]),
-            "recommendations": all_recommendations,
-            "cache_used": not force_refresh and len(recommendation_data["new_recommendations"]) > 0,
-            "translated": translated,
-            "language": target_language if translated else "en",
-            "translation_service": "gemini" if translated and use_gemini else "standard"
-        }
     except Exception as e:
-        logger.error(f"Error generating recommendations: {str(e)}")
+        logger.error(f"Error getting recommendations: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}

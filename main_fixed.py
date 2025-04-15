@@ -4140,7 +4140,7 @@ async def health_check():
                 "error": str(e)
             }
         )
-@@app.get("/recommendations/{user_id}", response_model=Dict)
+@app.get("/recommendations/{user_id}", response_model=Dict)
 async def get_recommendations(
     request: RecommendationRequest = Depends(),
     translate_results: bool = False,

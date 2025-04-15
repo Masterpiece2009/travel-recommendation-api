@@ -235,34 +235,18 @@ def translate_with_gemini(text, source_lang, target_lang):
         # Direct content generation approach
         prompt = f"Translate the following text from {get_language_name(source_lang)} to {get_language_name(target_lang)}. Return only the translated text without quotes: \"{text}\""
         
-        # Models to try, in order of preference (based on your available models)
-        model_names = [
-            "models/gemini-1.5-pro-latest",
-            "models/gemini-1.5-pro",
-            "models/gemini-1.5-pro-002",
-            "models/gemini-1.5-flash-latest",
-            "models/gemini-1.5-flash"
-        ]
+        # Use the model we know works
+        model_name = "models/gemini-1.5-flash-latest"
         
-        translated_text = None
-        last_error = None
-        
-        # Try each model in sequence
-        for model_name in model_names:
-            try:
-                logger.info(f"Trying translation with model: {model_name}")
-                gen_model = genai.GenerativeModel(model_name)
-                response = gen_model.generate_content(prompt)
-                translated_text = response.text.strip()
-                logger.info(f"Successfully used model: {model_name}")
-                break
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Model {model_name} failed: {str(e)}")
-        
-        # If all models failed, raise exception
-        if translated_text is None:
-            raise Exception(f"All models failed. Last error: {str(last_error)}")
+        try:
+            logger.info(f"Using translation model: {model_name}")
+            gen_model = genai.GenerativeModel(model_name)
+            response = gen_model.generate_content(prompt)
+            translated_text = response.text.strip()
+            logger.info(f"Successfully used model: {model_name}")
+        except Exception as e:
+            logger.warning(f"Model {model_name} failed: {str(e)}")
+            raise Exception(f"Translation failed with model {model_name}: {str(e)}")
         
         # Remove quotes if they were added by the model
         if translated_text.startswith('"') and translated_text.endswith('"'):

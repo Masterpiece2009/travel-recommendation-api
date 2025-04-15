@@ -22,6 +22,11 @@ import hashlib
 from langdetect import detect
 from deep_translator import GoogleTranslator
 import copy
+import os
+import google.generativeai as genai
+from dotenv import load_dotenv
+import json
+import asyncio
 def detect_language(text):
     """
     Detect the language of a text string with improved Arabic detection.

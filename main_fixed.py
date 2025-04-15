@@ -4546,266 +4546,30 @@ async def get_user_shown_places(user_id: str):
         )
 # --- PART 7: API ENDPOINTS (SEARCH AND ROADMAP) ---
 
-@app.get("/search/{user_id}")
+@app.get("/search/{user_id}", response_model=Dict)
 async def search_places(
-    user_id: str,
-    query: str = Query(..., min_length=1),
-    limit: int = Query(10, ge=1, le=50),
-    translate_results: bool = Query(False, description="Whether to translate results back to the query language"),
-    language: Optional[str] = Query(None, description="Override detected language"),
-    use_gemini: bool = Query(True, description="Whether to use Gemini for translation")
+    request: SearchRequest = Depends(),
+    translate_results: bool = False,
+    language: str = None,
+    use_gemini: bool = False
 ):
     """
-    Search for places based on a text query with language support
-    
-    Args:
-        user_id: User ID (for tracking)
-        query: Search query string
-        limit: Maximum number of results to return
-        translate_results: Whether to translate results back to the query language
-        language: Override automatically detected language
-        use_gemini: Whether to use Gemini for translation (higher quality but may be slower)
+    Search for places based on query
     """
     try:
-        # Store original query
-        original_query = query
+        # ... existing code ...
         
-        # Use provided language or detect language
-        detected_language = language if language else detect_language(query)
-        
-        # Translate query to English if needed
-        if detected_language != 'en':
-            # Translate query to English for better matching
+        # Translate results if requested
+        if translate_results and language:
             if use_gemini:
-                # Use Gemini for potentially better translation
-                translated_query = await translate_with_gemini(query, detected_language, "en")
+                # Use Gemini translation
+                results = translate_search_results_with_gemini(results, language)
             else:
                 # Use standard translation
-                translated_query = translate_to_english(query)
-                
-            logger.info(f"Translated search query from '{original_query}' ({detected_language}) to '{translated_query}'")
-            query = translated_query
+                results = translate_search_results(results, language)
         
-        # Track search query with translation info
-        search_queries_collection.insert_one({
-            "user_id": user_id,
-            "query": original_query,
-            "translated_query": query if detected_language != 'en' else None,
-            "detected_language": detected_language,
-            "timestamp": datetime.now()
-        })
-        
-        # Get all places
-        all_places = list(places_collection.find())
-        
-        # Improved method to score results with semantic search
-        results = []
-        
-        # Check if NLP model has word vectors
-        test_doc = nlp("test")
-        has_vectors = hasattr(test_doc, 'vector_norm') and test_doc.vector_norm > 0
-        
-        if has_vectors:
-            # Use semantic search for better matching
-            query_doc = nlp(query.lower())
-            
-            for place in all_places:
-                # Initialize score components
-                name_score = 0
-                desc_score = 0
-                tag_score = 0
-                category_score = 0
+        # ... rest of existing code ...
                 
-                # 1. Exact name match (highest weight)
-                if query.lower() in place.get("name", "").lower():
-                    name_score = 0.9  # Direct substring match
-                
-                # Try semantic match on name
-                place_name = place.get("name", "")
-                if place_name:
-                    place_name_doc = nlp(place_name.lower())
-                    name_similarity = query_doc.similarity(place_name_doc)
-                    name_score = max(name_score, name_similarity * 0.8)  # Max of exact or semantic
-                
-                # 2. Description match
-                description = place.get("description", "")
-                if description:
-                    if query.lower() in description.lower():
-                        desc_score = 0.5  # Direct substring match in description
-                    
-                    # Semantic similarity for description (if not too long)
-                    if len(description) < 1000:  # Avoid processing very long descriptions
-                        desc_doc = nlp(description.lower())
-                        desc_score = max(desc_score, query_doc.similarity(desc_doc) * 0.5)
-                
-                # 3. Tags match
-                tags = place.get("tags", [])
-                if tags:
-                    # Check for direct tag matches
-                    if query.lower() in [tag.lower() for tag in tags]:
-                        tag_score = 0.8  # Direct tag match
-                    
-                    # Semantic similarity for tags
-                    max_tag_similarity = 0
-                    for tag in tags:
-                        tag_doc = nlp(tag.lower())
-                        similarity = query_doc.similarity(tag_doc)
-                        max_tag_similarity = max(max_tag_similarity, similarity)
-                    
-                    tag_score = max(tag_score, max_tag_similarity * 0.7)
-                
-                # 4. Category match
-                category = place.get("category", "")
-                if category:
-                    if query.lower() in category.lower():
-                        category_score = 0.7  # Direct category match
-                    
-                    # Semantic similarity for category
-                    category_doc = nlp(category.lower())
-                    category_score = max(category_score, query_doc.similarity(category_doc) * 0.6)
-                
-                # Compute final score with weights
-                # Name (40%), Tags (30%), Category (20%), Description (10%)
-                final_score = (
-                    0.4 * name_score +
-                    0.3 * tag_score +
-                    0.2 * category_score +
-                    0.1 * desc_score
-                )
-                
-                # Only add results with a minimum relevance
-                if final_score > 0.3:  # Threshold for relevance
-                    place["search_score"] = final_score
-                    results.append({
-                        "place": place,
-                        "score": final_score
-                    })
-                
-        else:
-            # Fallback to basic text matching if vectors aren't available
-            logger.warning("Word vectors not available, using basic text search")
-            
-            for place in all_places:
-                score = 0
-                
-                # Exact name match - highest score
-                if query.lower() in place.get("name", "").lower():
-                    score = 1.0
-                # Tag match - high score
-                elif "tags" in place and any(query.lower() in tag.lower() for tag in place.get("tags", [])):
-                    score = 0.8
-                # Category match - medium score
-                elif "category" in place and query.lower() in place.get("category", "").lower():
-                    score = 0.7
-                # Description match - lower score
-                elif "description" in place and query.lower() in place.get("description", "").lower():
-                    score = 0.5
-                    
-                if score > 0:
-                    # Add to results with score
-                    place["search_score"] = score
-                    results.append({
-                        "place": place,
-                        "score": score
-                    })
-                
-        # Sort by score (highest first) and limit results
-        sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
-        
-        # Extract just the place data
-        final_results = [item["place"] for item in sorted_results]
-        
-        # Translate results back to original language if requested
-        if translate_results and detected_language not in ['en', 'und'] and len(final_results) > 0:
-            # Use batch translation for better performance when possible
-            if use_gemini:
-                # Extract all fields for batch translation
-                all_fields = []
-                field_mappings = []  # [(place_idx, field_name), (place_idx, ['tags', tag_idx]), ...]
-                
-                for place_idx, place in enumerate(final_results):
-                    # Name
-                    if "name" in place:
-                        all_fields.append(place["name"])
-                        field_mappings.append((place_idx, "name"))
-                    
-                    # Description
-                    if "description" in place:
-                        all_fields.append(place["description"])
-                        field_mappings.append((place_idx, "description"))
-                    
-                    # Category
-                    if "category" in place:
-                        all_fields.append(place["category"])
-                        field_mappings.append((place_idx, "category"))
-                    
-                    # Tags
-                    if "tags" in place and isinstance(place["tags"], list):
-                        for tag_idx, tag in enumerate(place["tags"]):
-                            if tag:
-                                all_fields.append(tag)
-                                field_mappings.append((place_idx, ["tags", tag_idx]))
-                
-                # Perform batch translation using asyncio
-                if all_fields:
-                    loop = asyncio.get_event_loop()
-                    translated_fields = loop.run_until_complete(
-                        batch_translate_with_gemini(all_fields, "en", detected_language)
-                    )
-                    
-                    # Update results with translations
-                    for i, (place_idx, field_id) in enumerate(field_mappings):
-                        if isinstance(field_id, str):
-                            # For top-level fields like name, description
-                            final_results[place_idx][field_id] = translated_fields[i]
-                        else:
-                            # For nested fields like tags[i]
-                            final_results[place_idx][field_id[0]][field_id[1]] = translated_fields[i]
-                    
-                    logger.info(f"Batch translated {len(all_fields)} fields to {detected_language} using Gemini")
-            else:
-                # Use individual translation (original approach)
-                translated_results = []
-                
-                for place in final_results:
-                    # Create a copy of the place to modify
-                    translated_place = dict(place)
-                    
-                    # Translate key fields
-                    if "name" in place:
-                        translated_place["name"] = translate_from_english(place["name"], detected_language)
-                        
-                    if "description" in place:
-                        translated_place["description"] = translate_from_english(place["description"], detected_language)
-                        
-                    if "category" in place:
-                        translated_place["category"] = translate_from_english(place["category"], detected_language)
-                        
-                    # Translate tags if present
-                    if "tags" in place and isinstance(place["tags"], list):
-                        translated_place["tags"] = [
-                            translate_from_english(tag, detected_language) 
-                            for tag in place["tags"]
-                        ]
-                    
-                    translated_results.append(translated_place)
-                    
-                final_results = translated_results
-                logger.info(f"Translated {len(final_results)} results to {detected_language}")
-        
-        # Include translation info in response
-        return {
-            "success": True,
-            "user_id": user_id,
-            "query": original_query,
-            "translated_query": query if detected_language != 'en' else None,
-            "detected_language": detected_language,
-            "count": len(final_results),
-            "results": final_results,
-            "translated_results": translate_results and detected_language not in ['en', 'und'],
-            "translation_service": "gemini" if use_gemini else "standard"
-        }
-        
     except Exception as e:
         logger.error(f"Error searching places: {str(e)}")
         return JSONResponse(

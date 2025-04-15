@@ -321,7 +321,76 @@ def batch_translate_with_gemini(texts, source_lang, target_lang):
         translated_texts.append(translated_text)
     
     return translated_texts
+def translate_recommendation_results(results, target_language):
+    """
+    Translate recommendation results to the target language using standard translation
+    
+    Args:
+        results: List of recommendation result items to translate
+        target_language: Target language code
         
+    Returns:
+        Translated recommendation results list
+    """
+    try:
+        logger.info(f"Translating recommendation results to {target_language} using standard translation")
+        
+        # Create copies to avoid modifying originals
+        translated_results = copy.deepcopy(results)
+        
+        # Process each item separately
+        for item in translated_results:
+            # Name
+            if "name" in item and isinstance(item["name"], str) and item["name"]:
+                item["name"] = translate_from_english(item["name"], target_language)
+            
+            # Description
+            if "description" in item and isinstance(item["description"], str) and item["description"]:
+                item["description"] = translate_from_english(item["description"], target_language)
+            
+            # Location - City
+            if "location" in item and "city" in item["location"] and isinstance(item["location"]["city"], str) and item["location"]["city"]:
+                item["location"]["city"] = translate_from_english(item["location"]["city"], target_language)
+            
+            # Location - Country
+            if "location" in item and "country" in item["location"] and isinstance(item["location"]["country"], str) and item["location"]["country"]:
+                item["location"]["country"] = translate_from_english(item["location"]["country"], target_language)
+            
+            # Category
+            if "category" in item and isinstance(item["category"], str) and item["category"]:
+                item["category"] = translate_from_english(item["category"], target_language)
+            
+            # Reason
+            if "reason" in item and isinstance(item["reason"], str) and item["reason"]:
+                item["reason"] = translate_from_english(item["reason"], target_language)
+            
+            # Tags (if present)
+            if "tags" in item and isinstance(item["tags"], list):
+                for tag_idx, tag in enumerate(item["tags"]):
+                    if isinstance(tag, str) and tag:
+                        item["tags"][tag_idx] = translate_from_english(tag, target_language)
+            
+            # Source
+            if "source" in item and isinstance(item["source"], str) and item["source"]:
+                item["source"] = translate_from_english(item["source"], target_language)
+                
+            # Budget level
+            if "budget_level" in item and isinstance(item["budget_level"], str) and item["budget_level"]:
+                item["budget_level"] = translate_from_english(item["budget_level"], target_language)
+                
+            # Accessibility
+            if "accessibility" in item and isinstance(item["accessibility"], list):
+                for acc_idx, feature in enumerate(item["accessibility"]):
+                    if isinstance(feature, str) and feature:
+                        item["accessibility"][acc_idx] = translate_from_english(feature, target_language)
+        
+        logger.info(f"Translated recommendation results using standard translation")
+        return translated_results
+        
+    except Exception as e:
+        logger.error(f"Error translating recommendation results: {str(e)}")
+        # Return original results if translation fails
+        return results        
 def translate_roadmap_results(roadmap_list, target_language):
     """
     Translate roadmap results to the target language

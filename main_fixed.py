@@ -4299,18 +4299,16 @@ async def test_translation(text: str = "مرحبا بالعالم"):
         "success": True
     }
 
-@app.get("/test_gemini_translation")
-async def test_gemini_translation(text: str, target_lang: str = "ar"):
+@app.get("/test_gemini_translation", response_model=Dict)
+async def test_gemini_translation(
+    text: str,
+    target_lang: str = "ar"
+):
     """
     Test endpoint for Gemini translation
     """
     try:
-        # Initialize Gemini if not already initialized
-        initialize_gemini_api()
-        
-        # Translate using Gemini
-        translated = await translate_with_gemini(text, "en", target_lang)
-        
+        translated = translate_with_gemini(text, "en", target_lang)
         return {
             "success": True,
             "original": text,
@@ -4318,11 +4316,11 @@ async def test_gemini_translation(text: str, target_lang: str = "ar"):
             "target_language": target_lang
         }
     except Exception as e:
-        logger.error(f"Gemini translation test error: {str(e)}")
+        logger.error(f"Error in Gemini translation test: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"success": False, "error": str(e)}
-        )    
+        )
 @app.delete("/cache/{user_id}")
 async def clear_cache(user_id: str):
     """

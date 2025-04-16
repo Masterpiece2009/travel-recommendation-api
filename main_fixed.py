@@ -3993,16 +3993,60 @@ async def get_cache_status(user_id: str):
             content={"success": False, "error": str(e)}
         )
 @app.get("/test_translation")
-async def test_translation(text: str = "مرحبا بالعالم"):
-    """Test the translation functionality"""
-    detected = detect_language(text)
-    translated = translate_to_english(text)
-    return {
-        "original": text,
-        "detected_language": detected,
-        "translated": translated,
-        "success": True
-    }
+async def test_translation(
+    text: str = "مرحبا بالعالم", 
+    language: str = None, 
+    translate_results: bool = False
+):
+    """
+    Test the translation functionality
+    
+    Args:
+        text: Text to translate
+        language: Target language code (if translating from English)
+        translate_results: Whether to translate to the target language
+    """
+    try:
+        # First detect the source language
+        detected = detect_language(text)
+        
+        # Initialize translation variable
+        translated = text
+        
+        # If text is detected as English and we want to translate to another language
+        if detected == "en" and language and language != "en" and translate_results:
+            translated = translate_from_english(text, language)
+            return {
+                "original": text,
+                "detected_language": detected,
+                "target_language": language,
+                "translated": translated,
+                "success": True
+            }
+        # If text is not English, translate to English
+        elif detected != "en":
+            translated = translate_to_english(text)
+            return {
+                "original": text,
+                "detected_language": detected,
+                "translated": translated,
+                "success": True
+            }
+        # If text is English but no target language or translation not requested
+        else:
+            return {
+                "original": text,
+                "detected_language": detected,
+                "translated": text,  # No translation needed
+                "success": True
+            }
+    except Exception as e:
+        logger.error(f"Translation test failed: {e}")
+        return {
+            "original": text,
+            "error": str(e),
+            "success": False
+        }
 @app.delete("/cache/{user_id}")
 async def clear_cache(user_id: str):
     """

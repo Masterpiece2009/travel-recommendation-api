@@ -22,6 +22,51 @@ import hashlib
 from langdetect import detect
 from deep_translator import GoogleTranslator
 import copy
+
+def is_likely_english(text):
+    """
+    Helper function to determine if text is likely English based on character patterns
+    and common word presence.
+    
+    Args:
+        text: Text to analyze
+        
+    Returns:
+        Boolean indicating if text is likely English
+    """
+    if not text:
+        return True
+        
+    # Normalize the text
+    normalized = text.lower().strip()
+    
+    # Check for English-only characters
+    if not re.match(r'^[a-zA-Z\s\'\-,.!?0-9]+$', normalized):
+        return False
+        
+    # For very short texts (1-3 words), check against common English words
+    if len(normalized.split()) <= 3:
+        # This list contains very common English words that might appear in short phrases
+        very_common_words = {"the", "a", "an", "and", "or", "but", "is", "are", "was", "were", 
+                            "i", "you", "he", "she", "it", "we", "they", "my", "your", "his", 
+                            "her", "its", "our", "their", "to", "for", "with", "at", "from", 
+                            "by", "on", "in", "out", "up", "down", "this", "that", "these", 
+                            "those", "here", "there", "who", "what", "when", "where", "why", 
+                            "how", "which", "if", "then", "than", "yes", "no", "not", "can", 
+                            "will", "do", "does", "did", "have", "has", "had", "go", "went", 
+                            "gone", "come", "came", "get", "got", "make", "made", "see", "saw", 
+                            "say", "said", "good", "bad", "new", "old", "big", "small", "high", 
+                            "low", "many", "few", "some", "any", "all", "none", "every", "each"}
+        
+        # Check if any of the words are common English words
+        words = normalized.split()
+        for word in words:
+            # Remove punctuation for comparison
+            clean_word = word.strip(".,!?;:'\"")
+            if clean_word in very_common_words:
+                return True
+    
+    return False
 def detect_language(text):
     """
     Detect the language of a text string with improved detection for common words.
@@ -41,7 +86,10 @@ def detect_language(text):
         
         # Normalize text for comparison
         normalized_text = text.lower().strip()
-        
+        # Inside detect_language function, after the normalized_text assignment
+# Add this check before the common_english_words check
+if is_likely_english(normalized_text):
+    return "en"
         # Extensive list of common English words that might be confused with other languages
         common_english_words = {
             # Greetings and polite phrases

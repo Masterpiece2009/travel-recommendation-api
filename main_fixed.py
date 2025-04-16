@@ -86,10 +86,11 @@ def detect_language(text):
         
         # Normalize text for comparison
         normalized_text = text.lower().strip()
-        # Inside detect_language function, after the normalized_text assignment
-# Add this check before the common_english_words check
-if is_likely_english(normalized_text):
-    return "en"
+        
+        # Check if text is likely English
+        if is_likely_english(normalized_text):
+            return "en"
+        
         # Extensive list of common English words that might be confused with other languages
         common_english_words = {
             # Greetings and polite phrases

@@ -24,7 +24,7 @@ from deep_translator import GoogleTranslator
 import copy
 def detect_language(text):
     """
-    Detect the language of a text string with improved Arabic detection.
+    Detect the language of a text string with improved detection for common words.
     
     Args:
         text: Text string to analyze
@@ -33,28 +33,116 @@ def detect_language(text):
         Language code (e.g., 'en', 'ar')
     """
     try:
-        from langdetect import detect
+        from langdetect import detect, LangDetectException
         import re
         
         if not text or len(text.strip()) == 0:
+            return "en"
+        
+        # Normalize text for comparison
+        normalized_text = text.lower().strip()
+        
+        # Extensive list of common English words that might be confused with other languages
+        common_english_words = {
+            # Greetings and polite phrases
+            "welcome", "hello", "hi", "hey", "goodbye", "bye", "thanks", "thank you", 
+            "please", "sorry", "excuse me", "pardon", "cheers", "congratulations",
+            "morning", "evening", "night", "afternoon", "day", "good morning", 
+            "good evening", "good night", "good afternoon", "good day",
+            
+            # Common short words
+            "yes", "no", "maybe", "ok", "okay", "fine", "sure", "of course",
+            "the", "and", "or", "but", "if", "then", "than", "so", "thus",
+            "a", "an", "to", "in", "on", "at", "by", "for", "with", "about",
+            "from", "up", "down", "over", "under", "again", "once", "here", "there",
+            
+            # Time-related
+            "today", "tomorrow", "yesterday", "now", "later", "soon", "never",
+            "always", "often", "seldom", "sometimes", "rarely", "weekly", "daily",
+            "monthly", "yearly", "minute", "hour", "second", "week", "month", "year",
+            
+            # Common adjectives
+            "good", "bad", "nice", "great", "awesome", "cool", "hot", "cold",
+            "big", "small", "large", "tiny", "huge", "little", "long", "short",
+            "high", "low", "new", "old", "young", "easy", "hard", "difficult",
+            "happy", "sad", "angry", "excited", "tired", "busy", "free", "cheap",
+            "expensive", "beautiful", "pretty", "handsome", "ugly", "clean", "dirty",
+            
+            # Common verbs
+            "go", "come", "get", "take", "make", "do", "have", "be", "is", "are",
+            "was", "were", "has", "had", "can", "could", "will", "would", "should",
+            "may", "might", "must", "need", "want", "like", "love", "hate", "see",
+            "look", "watch", "hear", "listen", "speak", "say", "tell", "eat", "drink",
+            "sleep", "work", "play", "walk", "run", "stop", "start", "finish",
+            
+            # Common nouns
+            "man", "woman", "child", "boy", "girl", "person", "people", "family",
+            "friend", "house", "home", "car", "bus", "train", "plane", "boat",
+            "food", "water", "book", "phone", "computer", "internet", "world",
+            "country", "city", "town", "street", "road", "way", "thing", "name",
+            
+            # Question words
+            "who", "what", "where", "when", "why", "how", "which", "whose",
+            
+            # Numbers and quantities
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "first", "second", "third", "last", "many", "much", "more", "less", "few",
+            "some", "any", "all", "none", "every", "each", "most", "least",
+            
+            # Travel specific (for your app)
+            "travel", "hotel", "flight", "booking", "reservation", "destination",
+            "trip", "journey", "vacation", "holiday", "airport", "beach", "mountain",
+            "tourist", "guide", "tour", "visit", "passport", "visa", "luggage",
+            "suitcase", "backpack", "map", "location", "address", "restaurant",
+            "cafe", "museum", "park", "garden", "castle", "palace", "monument",
+            "souvenir", "photo", "picture", "camera", "sunset", "sunrise"
+        }
+        
+        # Check if the text is a common English word
+        if normalized_text in common_english_words:
             return "en"
         
         # Check for Arabic script characters
         arabic_pattern = re.compile(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]+')
         if arabic_pattern.search(text):
             # For short texts with Arabic characters, we'll default to Arabic
-            # This helps avoid the Persian misidentification issue
             if len(text) < 20:
                 return "ar"
         
-        # Use standard detection for longer texts
-        detected = detect(text)
+        # For very short texts, try to be more precise
+        if len(normalized_text) < 10:
+            # These short text detection rules help avoid common misdetections
+            # English specific patterns (most English words only use these characters)
+            english_pattern = re.compile(r'^[a-zA-Z\s\'\-,.!?]+$')
+            if english_pattern.match(normalized_text):
+                # Check if text contains common English word patterns
+                english_word_pattern = re.compile(r'\b(the|and|to|of|in|is|it|that|for|on|with|as|at|by|this|from)\b', re.IGNORECASE)
+                if english_word_pattern.search(normalized_text):
+                    return "en"
         
-        # Fix common misidentification between Persian and Arabic
-        if detected == "fa" and arabic_pattern.search(text):
-            return "ar"  # Override Persian detection for Arabic script
+        # Use standard detection for longer texts
+        try:
+            detected = detect(text)
             
-        return detected
+            # Fix common misidentification between Persian and Arabic
+            if detected == "fa" and arabic_pattern.search(text):
+                return "ar"  # Override Persian detection for Arabic script
+            
+            # Additional overrides for common misdetections of short English phrases
+            if detected in ["nl", "af", "no", "da", "sv", "de", "fr"] and len(normalized_text) < 15:
+                # These languages often get confused with English for short phrases
+                # Do a second pass check with more context
+                if english_pattern.match(normalized_text):
+                    # If it looks like English orthographically and is short, trust that more
+                    return "en"
+                
+            return detected
+        except LangDetectException:
+            # If langdetect fails on short text, default to English for Latin script
+            if re.match(r'^[a-zA-Z\s\'\-,.!?]+$', text):
+                return "en"
+            raise  # Re-raise for other exceptions
+            
     except Exception as e:
         logger.warning(f"Language detection failed: {e}")
         return "en"  # Default to English if detection fails

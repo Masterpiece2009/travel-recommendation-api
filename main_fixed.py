@@ -3107,11 +3107,34 @@ def calculate_budget_compatibility(place_budget_level, user_budget_level):
     Returns:
         Compatibility score between 0 and 1
     """
+    # Helper function to safely extract numeric values
+    def ensure_numeric(value, default=3):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return int(value["$numberInt"])
+            if "$numberLong" in value:
+                return int(value["$numberLong"])
+            return default  # Default if it's an unrecognized dict
+        try:
+            return float(value) if isinstance(value, str) else value
+        except (ValueError, TypeError):
+            return default
+            
     # Standardize budget levels
     if isinstance(place_budget_level, str):
         place_budget_level = map_budget_level(place_budget_level)
+    else:
+        # Handle potential MongoDB dictionary representation
+        place_budget_level = ensure_numeric(place_budget_level)
+        
     if isinstance(user_budget_level, str):
         user_budget_level = map_budget_level(user_budget_level)
+    else:
+        # Handle potential MongoDB dictionary representation
+        user_budget_level = ensure_numeric(user_budget_level)
     
     # Calculate the absolute difference (0-4)
     diff = abs(place_budget_level - user_budget_level)
@@ -3121,7 +3144,6 @@ def calculate_budget_compatibility(place_budget_level, user_budget_level):
     score = 1 - (diff / 4)
     
     return score
-
 def check_accessibility_compatibility(place, accessibility_needs):
     """
     Check if a place is compatible with the user's accessibility needs.

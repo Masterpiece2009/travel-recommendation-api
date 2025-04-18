@@ -1670,6 +1670,22 @@ def get_collaborative_recommendations(user_id, target_count=39, excluded_place_i
     Returns:
         List of place IDs recommended through collaborative filtering
     """
+    # Helper function to safely extract numeric values
+    def ensure_float(value):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return float(int(value["$numberInt"]))
+            if "$numberLong" in value:
+                return float(int(value["$numberLong"]))
+            return 0.0  # Default if it's an unrecognized dict
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+            
     try:
         logger.info(f"Finding collaborative recommendations for user {user_id}")
         
@@ -1690,7 +1706,7 @@ def get_collaborative_recommendations(user_id, target_count=39, excluded_place_i
         
         # Get similar user IDs and create similarity map
         similar_user_ids = [u["user_id"] for u in similar_users]
-        similarity_map = {u["user_id"]: u["similarity"] for u in similar_users}
+        similarity_map = {u["user_id"]: ensure_float(u["similarity"]) for u in similar_users}  # Use ensure_float here
 
         # Define weights for different interaction types
         action_weights = {
@@ -1735,8 +1751,8 @@ def get_collaborative_recommendations(user_id, target_count=39, excluded_place_i
             similar_user_id = interaction["user_id"]
             action = interaction["interaction_type"]
             
-            # Get user similarity score
-            user_similarity = similarity_map.get(similar_user_id, 0.5)  # Default 0.5 if missing
+            # Get user similarity score - ensure it's a standard float
+            user_similarity = ensure_float(similarity_map.get(similar_user_id, 0.5))  # Default 0.5 if missing
             
             # Skip low similarity users
             if user_similarity < 0.3:
@@ -1785,20 +1801,12 @@ def get_collaborative_recommendations(user_id, target_count=39, excluded_place_i
                     place_scores[place_id] = 0
                 place_scores[place_id] += final_score
 
-        # Sort places by score
-        sorted_places = sorted(place_scores.items(), key=lambda x: x[1], reverse=True)
+        # Sort places by score - using the helper function for comparison
+        sorted_places = sorted(place_scores.items(), key=lambda x: ensure_float(x[1]), reverse=True)
         top_place_ids = [place_id for place_id, _ in sorted_places[:target_count*2]]
         
         if not top_place_ids:
             return []
-            
-        # Remove the following section that gets place documents:
-        # Get place documents
-        # recommended_places = list(places_collection.find({"_id": {"$in": top_place_ids}}))
-        
-        # Sort by original weight
-        # place_weights = {place_id: weight for place_id, weight in sorted_places}
-        # recommended_places.sort(key=lambda x: place_weights.get(x["_id"], 0), reverse=True)
         
         # Log the number of recommendations found
         logger.info(f"Found {len(top_place_ids[:target_count])} collaborative recommendations for user {user_id}")

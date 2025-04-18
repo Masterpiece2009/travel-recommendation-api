@@ -3701,7 +3701,7 @@ def generate_hybrid_roadmap(user_id):
             # Add diversity picks to recommendations
             mixed_recommendations.extend(diversity_picks)
         
-        # --- 4. TOP RATED IN DESTINATIONS / GENERAL TOP RATED ---
+       # --- 4. TOP RATED IN DESTINATIONS / GENERAL TOP RATED ---
         top_category = "destination_top" if destinations and len(destinations) > 0 else "top_rated"
         if category_counts.get(top_category, 0) > 0:
             count = category_counts[top_category]
@@ -3710,8 +3710,11 @@ def generate_hybrid_roadmap(user_id):
             candidate_places = destination_places if destinations and len(destinations) > 0 else filtered_places
             candidate_places = [p for p in candidate_places if p["_id"] not in selected_place_ids]
             
-            # Sort by rating
-            candidate_places.sort(key=lambda p: float(p.get("rating", 0)), reverse=True)
+            # Sort by rating - use average_rating field and handle MongoDB numeric types
+            candidate_places.sort(
+                key=lambda p: extract_numeric(p.get("average_rating", 0)),
+                reverse=True
+            )
             
             # Add top rated
             added = 0
@@ -3732,7 +3735,7 @@ def generate_hybrid_roadmap(user_id):
                 
                 selected_place_ids.add(place["_id"])
                 added += 1
-                logger.info(f"Added top rated: {place.get('name')} (rating: {place.get('rating', 'N/A')})")
+                logger.info(f"Added top rated: {place.get('name')} (rating: {extract_numeric(place.get('average_rating', 'N/A'))}")
     
     # --- FALLBACK MECHANISMS ---
     # If we still don't have 10 places, implement fallbacks

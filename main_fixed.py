@@ -1852,6 +1852,23 @@ def find_similar_users(user_id, min_similarity=0.15, max_users=40):  # Lowered t
     Returns:
         List of similar user IDs with similarity scores
     """
+    # Helper function to safely extract numeric values
+    def get_safe_score(item):
+        score = item["similarity"]
+        if isinstance(score, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in score:
+                return float(score["$numberDouble"])
+            if "$numberInt" in score:
+                return float(int(score["$numberInt"]))
+            if "$numberLong" in score:
+                return float(int(score["$numberLong"]))
+            return 0.0  # Default if it's an unrecognized dict
+        try:
+            return float(score)
+        except (TypeError, ValueError):
+            return 0.0
+    
     try:
         # Check if we have cached similar users
         cached_similar = similar_users_cache.find_one({"user_id": user_id})
@@ -1890,15 +1907,18 @@ def find_similar_users(user_id, min_similarity=0.15, max_users=40):  # Lowered t
             })
             
             # Only include users above minimum similarity in the main list
-            if similarity_score >= min_similarity:
+            # Safe comparison using converted value
+            safe_score = get_safe_score({"similarity": similarity_score})
+            if safe_score >= min_similarity:
                 similar_users.append({
                     "user_id": other_id,
                     "similarity": similarity_score
                 })
-                logger.info(f"Found similar user {other_id} with score {similarity_score:.2f}")
+                logger.info(f"Found similar user {other_id} with score {safe_score:.2f}")
         
         # Sort by similarity (descending) and take top users
-        similar_users.sort(key=lambda x: x["similarity"], reverse=True)
+        # FIXED: Use safe score extraction for sorting
+        similar_users.sort(key=get_safe_score, reverse=True)
         similar_users = similar_users[:max_users]
         
         # If no similar users above threshold, use fallback
@@ -1906,7 +1926,8 @@ def find_similar_users(user_id, min_similarity=0.15, max_users=40):  # Lowered t
             logger.info(f"No users above similarity threshold {min_similarity}. Using best available matches.")
             
             # Sort and take top 5 regardless of threshold
-            all_scored_users.sort(key=lambda x: x["similarity"], reverse=True)
+            # FIXED: Use safe score extraction for sorting
+            all_scored_users.sort(key=get_safe_score, reverse=True)
             similar_users = all_scored_users[:5]
             
             logger.info(f"Using {len(similar_users)} fallback similar users with lower similarity")
@@ -1914,7 +1935,8 @@ def find_similar_users(user_id, min_similarity=0.15, max_users=40):  # Lowered t
             # Log the top fallback user
             if similar_users:
                 top_user = similar_users[0]
-                logger.info(f"Top fallback user: {top_user['user_id']} with similarity {top_user['similarity']:.2f}")
+                top_safe_score = get_safe_score(top_user)
+                logger.info(f"Top fallback user: {top_user['user_id']} with similarity {top_safe_score:.2f}")
         
         # Cache the result
         similar_users_cache.update_one(

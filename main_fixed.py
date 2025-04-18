@@ -749,6 +749,22 @@ def find_similar_terms(word, limit=3):
     Returns:
         List of similar terms
     """
+    # Helper function to safely extract float values
+    def ensure_float(value):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return float(int(value["$numberInt"]))
+            if "$numberLong" in value:
+                return float(int(value["$numberLong"]))
+            return 0.0  # Default if it's an unrecognized dict
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+            
     try:
         # Detect language and translate if needed
         original_word = word
@@ -797,11 +813,14 @@ def find_similar_terms(word, limit=3):
             term_doc = nlp(term)
             if term_doc and term_doc[0].has_vector:
                 similarity = term_doc[0].similarity(word_processed[0])
-                if similarity > 0.4 and term != word:  # Only include sufficiently similar terms
-                    term_similarities.append((term, similarity))
+                # Convert similarity to ensure it's a standard Python float
+                safe_similarity = ensure_float(similarity)
+                if safe_similarity > 0.4 and term != word:  # Only include sufficiently similar terms
+                    term_similarities.append((term, safe_similarity))
         
         # Sort by similarity and take top results
-        term_similarities.sort(key=lambda x: x[1], reverse=True)
+        # Using the safe float values for comparison
+        term_similarities.sort(key=lambda x: ensure_float(x[1]), reverse=True)
         similar_terms = [term for term, _ in term_similarities[:limit]]
         
         return similar_terms

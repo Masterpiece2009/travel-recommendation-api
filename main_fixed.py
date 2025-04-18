@@ -1967,22 +1967,84 @@ def get_discovery_places(user_id, limit=10):
         preferred_categories = user_prefs.get("preferred_categories", [])
         preferred_tags = user_prefs.get("preferred_tags", [])
 
-        # Find places in different categories but highly rated
-        discovery_query = {
-            "$and": [
-                {"category": {"$nin": preferred_categories}},
-                {"average_rating": {"$gte": 4.0}}  # Only high-rated places
-            ]
-        }
+        # Define ensure_float helper function
+        def ensure_float(value):
+            if isinstance(value, dict):
+                # Handle MongoDB numeric types
+                if "$numberDouble" in value:
+                    return float(value["$numberDouble"])
+                if "$numberInt" in value:
+                    return float(int(value["$numberInt"]))
+                if "$numberLong" in value:
+                    return float(int(value["$numberLong"]))
+                return 0.0  # Default if it's an unrecognized dict
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
 
-        # Get discovery places and sort by rating
-        discovery_places = list(places_collection.find(discovery_query).sort("average_rating", -1).limit(limit * 2))
+        # Find places in different categories but highly rated
+        # Use MongoDB's aggregate to properly compare ratings
+        discovery_pipeline = [
+            {
+                "$match": {
+                    "category": {"$nin": preferred_categories}
+                }
+            },
+            {
+                "$addFields": {
+                    "numeric_rating": {
+                        "$cond": {
+                            "if": {"$eq": [{"$type": "$average_rating"}, "object"]},
+                            "then": "$average_rating.$numberDouble",
+                            "else": "$average_rating"
+                        }
+                    }
+                }
+            },
+            {
+                "$match": {
+                    "numeric_rating": {"$gte": 4.0}
+                }
+            },
+            {
+                "$sort": {"numeric_rating": -1}
+            },
+            {
+                "$limit": limit * 2
+            }
+        ]
+
+        discovery_places = list(places_collection.aggregate(discovery_pipeline))
 
         # If we don't have enough, try a broader search
         if len(discovery_places) < limit:
-            fallback_places = list(places_collection.find({
-                "category": {"$nin": preferred_categories}
-            }).sort("average_rating", -1).limit(limit * 2))
+            fallback_pipeline = [
+                {
+                    "$match": {
+                        "category": {"$nin": preferred_categories}
+                    }
+                },
+                {
+                    "$addFields": {
+                        "numeric_rating": {
+                            "$cond": {
+                                "if": {"$eq": [{"$type": "$average_rating"}, "object"]},
+                                "then": "$average_rating.$numberDouble",
+                                "else": "$average_rating"
+                            }
+                        }
+                    }
+                },
+                {
+                    "$sort": {"numeric_rating": -1}
+                },
+                {
+                    "$limit": limit * 2
+                }
+            ]
+
+            fallback_places = list(places_collection.aggregate(fallback_pipeline))
 
             # Add any new places not already in discovery_places
             existing_ids = set(p["_id"] for p in discovery_places)

@@ -1999,6 +1999,28 @@ def calculate_personalization_score(place, user_id, user_prefs):
     Returns:
         Personalization score between 0 and 1
     """
+    # Helper function to safely extract numeric values from MongoDB data
+    def extract_numeric(value, default=0):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return float(int(value["$numberInt"]))
+            if "$numberLong" in value:
+                return float(int(value["$numberLong"]))
+            return default
+        
+        # Handle direct numeric types
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        # Try converting string to float
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     try:
         # 1. Category matching (40% of score)
         category_score = 0
@@ -2031,8 +2053,10 @@ def calculate_personalization_score(place, user_id, user_prefs):
             # No tags to compare, neutral score
             tag_score = 0.5
             
-        # 3. Rating factor (20% of score)
-        rating_score = min(place.get("rating", 0) / 5.0, 1.0)  # Normalize to 0-1
+        # 3. Rating factor (20% of score) - FIXED to handle MongoDB type
+        raw_rating = place.get("rating", 0)
+        rating_value = extract_numeric(raw_rating, 0)  # Extract numeric value safely
+        rating_score = min(rating_value / 5.0, 1.0)  # Normalize to 0-1
             
         # 4. User interaction history (10% of score)
         interaction_score = 0.5  # Default neutral score
@@ -2049,7 +2073,8 @@ def calculate_personalization_score(place, user_id, user_prefs):
                 interaction_score = 0.9
             elif past_interactions.get("saved", False):
                 interaction_score = 0.8
-            elif past_interactions.get("viewed", 0) > 3:
+            # Handle viewed count which might be a MongoDB type
+            elif extract_numeric(past_interactions.get("viewed", 0)) > 3:
                 interaction_score = 0.7
             # Negative interactions decrease score
             elif past_interactions.get("disliked", False):
@@ -2068,7 +2093,6 @@ def calculate_personalization_score(place, user_id, user_prefs):
     except Exception as e:
         logger.error(f"Error calculating personalization score: {e}")
         return 0.5  # Return neutral score on error
-
 def rank_places(candidate_places, user_id):
     """
     Rank places based on user engagement and popularity metrics.

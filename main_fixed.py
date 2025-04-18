@@ -2491,6 +2491,28 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
     Returns:
         List of personalized recommendations
     """
+    # Helper function to safely extract numeric values from MongoDB dictionary representations
+    def extract_numeric(value, default=0):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return float(int(value["$numberInt"]))
+            if "$numberLong" in value:
+                return float(int(value["$numberLong"]))
+            return default
+        
+        # Handle direct numeric types
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        # Try converting string to float
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+            
     try:
         logger.info(f"Generating final recommendations for user {user_id}, need {num_recommendations}")
         
@@ -2524,8 +2546,8 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
                 # Get all collaborative place details
                 all_collab_places = list(places_collection.find({"_id": {"$in": collab_places_ids}}))
                 
-                # Sort collaborative recommendations by rating for consistency
-                all_collab_places.sort(key=lambda x: x.get("average_rating", 0), reverse=True)
+                # Sort collaborative recommendations by rating for consistency - FIXED
+                all_collab_places.sort(key=lambda x: extract_numeric(x.get("average_rating", 0)), reverse=True)
                 
                 # Use top collaborative places up to our limit
                 collab_to_add = all_collab_places[:collab_count]
@@ -2660,10 +2682,15 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
             # FALLBACK SOURCE 4: Any top-rated places as last resort
             top_rated_places = []
             try:
-                # Get top-rated places not already included
+                # Get top-rated places not already included - FIXED avoid server-side sorting
                 raw_top_rated = list(places_collection.find(
                     {"_id": {"$nin": current_rec_ids + previously_shown_ids}}
-                ).sort("average_rating", -1).limit(remaining_needed))
+                ).limit(remaining_needed * 3))  # Get more than needed
+                
+                # Sort client-side using extract_numeric - FIXED
+                raw_top_rated.sort(key=lambda p: extract_numeric(p.get("average_rating", 0)), reverse=True)
+                # Take only what we need
+                raw_top_rated = raw_top_rated[:remaining_needed]
                 
                 for place in raw_top_rated:
                     place["source"] = "top_rated"
@@ -2702,11 +2729,16 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
             remaining_needed = num_recommendations - len(recommendations)
             logger.info(f"Still need {remaining_needed} more places, using any available places")
             
-            # Get any places excluding what we've already added
+            # Get any places excluding what we've already added - FIXED avoid server-side sorting
             current_rec_ids = [r["_id"] for r in recommendations]
             last_resort_places = list(places_collection.find(
                 {"_id": {"$nin": current_rec_ids}}
-            ).sort("average_rating", -1).limit(remaining_needed))
+            ).limit(remaining_needed * 3))  # Get more than needed
+            
+            # Sort client-side using extract_numeric - FIXED
+            last_resort_places.sort(key=lambda p: extract_numeric(p.get("average_rating", 0)), reverse=True)
+            # Take only what we need
+            last_resort_places = last_resort_places[:remaining_needed]
             
             for place in last_resort_places:
                 place["source"] = "last_resort"
@@ -2719,11 +2751,21 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
     
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")
-        # Return some fallback recommendations in case of error
-        fallback_places = list(places_collection.find().sort("average_rating", -1).limit(num_recommendations))
-        for place in fallback_places:
-            place["source"] = "error_fallback"
-        return fallback_places
+        # Return some fallback recommendations in case of error - FIXED avoid server-side sorting
+        try:
+            fallback_places = list(places_collection.find().limit(num_recommendations * 3))
+            
+            # Sort client-side using extract_numeric - FIXED
+            fallback_places.sort(key=lambda p: extract_numeric(p.get("average_rating", 0)), reverse=True)
+            # Take only what we need
+            fallback_places = fallback_places[:num_recommendations]
+            
+            for place in fallback_places:
+                place["source"] = "error_fallback"
+            return fallback_places
+        except Exception as fallback_error:
+            logger.error(f"Error in fallback recommendation retrieval: {fallback_error}")
+            return []  # Return empty list as ultimate fallback
 def get_recommendations_with_caching(user_id, force_refresh=False, num_new_recommendations=10, max_total=30):
     """
     Get recommendations for a user with caching and progressive pagination.

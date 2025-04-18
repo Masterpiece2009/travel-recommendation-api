@@ -2980,6 +2980,28 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     Returns:
         Distance in kilometers
     """
+    # Helper function to safely extract a numeric value
+    def ensure_float(value):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return float(int(value["$numberInt"]))
+            if "$numberLong" in value:
+                return float(int(value["$numberLong"]))
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    
+    # Safely convert all coordinates to floats
+    lat1 = ensure_float(lat1)
+    lon1 = ensure_float(lon1)
+    lat2 = ensure_float(lat2)
+    lon2 = ensure_float(lon2)
+    
     # Convert decimal degrees to radians
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     

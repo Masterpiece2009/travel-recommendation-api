@@ -2391,8 +2391,8 @@ def generate_final_recommendations(user_id, num_recommendations=10, previously_s
                 score = calculate_personalization_score(place, user_id, user_prefs)
                 ranked_places.append((place, score))
             
-            # Sort places by personalization score
-            ranked_places.sort(key=lambda x: x[1], reverse=True)
+            # Sort places by personalization score - FIXED LINE
+            ranked_places.sort(key=lambda x: float(x[1]) if not isinstance(x[1], dict) else 0, reverse=True)
             
             # Add top content-based places
             added_content_places = 0

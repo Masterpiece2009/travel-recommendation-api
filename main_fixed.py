@@ -843,6 +843,22 @@ def find_places_by_keyword_similarity(keywords, excluded_place_ids=None, limit=2
     Returns:
         List of places matching the keywords
     """
+    # Helper function to safely extract float values
+    def ensure_float(value):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return float(int(value["$numberInt"]))
+            if "$numberLong" in value:
+                return float(int(value["$numberLong"]))
+            return 0.0  # Default if it's an unrecognized dict
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+            
     if not keywords:
         return []
         
@@ -911,12 +927,17 @@ def find_places_by_keyword_similarity(keywords, excluded_place_ids=None, limit=2
                 # Calculate similarity for each keyword
                 for keyword in keywords:
                     keyword_score = compute_text_similarity(keyword, place_text)
+                    # Ensure the score is a standard Python float
+                    keyword_score = ensure_float(keyword_score)
                     score += keyword_score
                 
-                place_scores.append((place, score / len(keywords)))
+                # Store the normalized score as a standard Python float
+                normalized_score = score / len(keywords)
+                place_scores.append((place, normalized_score))
             
             # Sort by score (descending) and take top results
-            place_scores.sort(key=lambda x: x[1], reverse=True)
+            # Use the ensure_float function to safely extract the score
+            place_scores.sort(key=lambda x: ensure_float(x[1]), reverse=True)
             results = [place for place, score in place_scores[:limit]]
             
             # Cache the result (only place IDs to save space)
@@ -957,7 +978,6 @@ def find_places_by_keyword_similarity(keywords, excluded_place_ids=None, limit=2
         logger.error(f"Error in find_places_by_keyword_similarity: {e}")
         # Return empty list on error
         return []
-
 def extract_search_keywords(user_id, user_preferences=None, max_keywords=5):
     """
     Extract search keywords for a user based on their preferences, with caching.

@@ -3002,6 +3002,23 @@ def generate_routes(places):
         List of route objects
     """
     routes = []
+    
+    # Helper function to safely extract a numeric value
+    def ensure_float(value):
+        if isinstance(value, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in value:
+                return float(value["$numberDouble"])
+            if "$numberInt" in value:
+                return float(int(value["$numberInt"]))
+            if "$numberLong" in value:
+                return float(int(value["$numberLong"]))
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    
     # For MVP, just create sequential routes between places
     for i in range(len(places) - 1):
         from_place = places[i]
@@ -3014,13 +3031,16 @@ def generate_routes(places):
         
         if "latitude" in from_loc and "longitude" in from_loc and "latitude" in to_loc and "longitude" in to_loc:
             try:
-                distance = calculate_distance(
-                    float(from_loc["latitude"]), float(from_loc["longitude"]),
-                    float(to_loc["latitude"]), float(to_loc["longitude"])
-                )
+                # Safely convert coordinates to float
+                from_lat = ensure_float(from_loc["latitude"])
+                from_lon = ensure_float(from_loc["longitude"])
+                to_lat = ensure_float(to_loc["latitude"])
+                to_lon = ensure_float(to_loc["longitude"])
+                
+                distance = calculate_distance(from_lat, from_lon, to_lat, to_lon)
                 # Round to 1 decimal place
                 distance = round(distance, 1)
-            except (ValueError, TypeError) as e:
+            except Exception as e:
                 logger.warning(f"Error calculating distance: {e}")
         
         routes.append({

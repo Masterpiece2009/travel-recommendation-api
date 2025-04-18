@@ -22,16 +22,6 @@ import hashlib
 from langdetect import detect
 from deep_translator import GoogleTranslator
 import copy
-# Add this at the top of your file, after imports
-# Monkey patch dict to handle comparisons safely
-_original_dict_lt = dict.__lt__
-def _safe_dict_lt(self, other):
-    if isinstance(other, dict):
-        # Convert dictionaries to strings for comparison (arbitrary but consistent)
-        return str(self) < str(other)
-    return _original_dict_lt(self, other)
-
-dict.__lt__ = _safe_dict_lt
 def is_likely_english(text):
     """
     Helper function to determine if text is likely English based on character patterns

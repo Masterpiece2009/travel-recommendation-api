@@ -423,6 +423,30 @@ except ImportError as e:
     print(f"❌ Error loading language packages: {e}")
     logger.error(f"❌ Error loading language packages: {e}")
 
+# Import MongoClient at the top of your file
+from pymongo import MongoClient
+
+# ... (other imports)
+
+# Define connect_mongo function
+def connect_mongo(uri, retries=3):
+    """Connect to MongoDB with retry logic"""
+    last_error = None
+    
+    for attempt in range(retries):
+        try:
+            client = MongoClient(uri)
+            # Test the connection
+            client.admin.command('ping')
+            print(f"✅ MongoDB connection successful (attempt {attempt + 1})")
+            return client
+        except Exception as e:
+            last_error = e
+            print(f"❌ MongoDB connection attempt {attempt + 1} failed: {e}")
+            
+    # If we get here, all retries failed
+    raise Exception(f"❌ MongoDB connection failed after {retries} attempts: {last_error}")
+
 # Securely Connect to MongoDB
 password = os.environ.get("MONGO_PASSWORD", "cmCqBjtQCQDWbvlo")  # Fallback for development
 encoded_password = urllib.parse.quote_plus(password)
@@ -430,7 +454,6 @@ encoded_password = urllib.parse.quote_plus(password)
 MONGO_URI = f"mongodb+srv://shehabwww153:{encoded_password}@userauth.rvtb5.mongodb.net/travel_app?retryWrites=true&w=majority&appName=userAuth"
 client = connect_mongo(MONGO_URI)
 db = client["travel_app"]
-
 # Define Collections
 users_collection = db["users"]
 places_collection = db["places"]

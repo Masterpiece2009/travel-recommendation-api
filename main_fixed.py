@@ -422,11 +422,12 @@ try:
 except ImportError as e:
     print(f"❌ Error loading language packages: {e}")
     logger.error(f"❌ Error loading language packages: {e}")
+
 # ✅ Securely Connect to MongoDB
-password = os.environ.get("MONGO_PASSWORD", "master2002_B*")  # Fallback for development
+password = os.environ.get("MONGO_PASSWORD", "cmCqBjtQCQDWbvlo")  # Fallback for development
 encoded_password = urllib.parse.quote_plus(password)
 
-MONGO_URI = f"mongodb+srv://abdelrahman:{encoded_password}@cluster0.goxvb.mongodb.net/travel_app?retryWrites=true&w=majority&appName=Cluster0"
+MONGO_URI = f"mongodb+srv://shehabwww153:{encoded_password}@userauth.rvtb5.mongodb.net/travel_app?retryWrites=true&w=majority&appName=userAuth"
 
 def connect_mongo(uri, retries=3, retry_delay=2):
     """Attempts to connect to MongoDB with improved retry logic."""

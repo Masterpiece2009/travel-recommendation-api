@@ -1232,6 +1232,22 @@ def get_candidate_places(user_preferences, user_id, size=30):
     """
     logger.info(f"Finding candidate places for user {user_id}")
     
+    # Helper function to safely get numeric values from MongoDB
+    def get_safe_score(score):
+        if isinstance(score, dict):
+            # Handle MongoDB numeric types
+            if "$numberDouble" in score:
+                return float(score["$numberDouble"])
+            if "$numberInt" in score:
+                return float(int(score["$numberInt"]))
+            if "$numberLong" in score:
+                return float(int(score["$numberLong"]))
+            return 0.0  # Default if it's an unrecognized dict
+        try:
+            return float(score)
+        except (TypeError, ValueError):
+            return 0.0
+    
     # FIXED: Make sure we have the full user document with preferences
     # If user_preferences doesn't have preferences, try to get the full user document
     if not isinstance(user_preferences, dict) or "preferences" not in user_preferences:
@@ -1336,9 +1352,9 @@ def get_candidate_places(user_preferences, user_id, size=30):
         
         scored_places.append((place, score))
     
-    # Sort by score descending
-    scored_places.sort(key=lambda x: x[1], reverse=True)
-    category_tag_places = [place for place, score in scored_places if score > 0.01]  # Filter minimal scores
+    # FIXED: Sort by score using safe extraction of score value
+    scored_places.sort(key=lambda x: get_safe_score(x[1]), reverse=True)
+    category_tag_places = [place for place, score in scored_places if get_safe_score(score) > 0.01]  # Filter minimal scores
     
     # Limit to ensure we don't have too many low-quality matches
     category_tag_places = category_tag_places[:min(len(category_tag_places), size)]
@@ -1554,8 +1570,8 @@ def get_candidate_places(user_preferences, user_id, size=30):
                     if match_score > 0.2:  # Lower threshold for text matching
                         scored_semantic_places.append((place, match_score))
             
-            # Sort by score
-            scored_semantic_places.sort(key=lambda x: x[1], reverse=True)
+            # FIXED: Sort by score using safe extraction of score value
+            scored_semantic_places.sort(key=lambda x: get_safe_score(x[1]), reverse=True)
             semantic_places = [place for place, _ in scored_semantic_places]
             logger.info(f"Found {len(semantic_places)} places via search keywords (fallback level: {fallback_level})")
         
@@ -1598,7 +1614,6 @@ def get_candidate_places(user_preferences, user_id, size=30):
     
     logger.info(f"Returning {len(candidate_places)} total candidate places for user {user_id}")
     return candidate_places
-
 
 import math
 from datetime import datetime, timedelta

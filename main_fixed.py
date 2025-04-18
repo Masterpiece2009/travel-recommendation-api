@@ -423,32 +423,11 @@ except ImportError as e:
     print(f"❌ Error loading language packages: {e}")
     logger.error(f"❌ Error loading language packages: {e}")
 
-# ✅ Securely Connect to MongoDB
-# First try to use the predefined MONGO_URI from environment variables
-MONGO_URI = os.environ.get("MONGO_URI")
+# Securely Connect to MongoDB
+password = os.environ.get("MONGO_PASSWORD", "cmCqBjtQCQDWbvlo")  # Fallback for development
+encoded_password = urllib.parse.quote_plus(password)
 
-# If MONGO_URI is not set in environment, then construct it
-if not MONGO_URI:
-    password = os.environ.get("MONGO_PASSWORD", "cmCqBjtQCQDWbvlo")  # Fallback for development
-    encoded_password = urllib.parse.quote_plus(password)
-    MONGO_URI = f"mongodb+srv://shehabwww153:{encoded_password}@userauth.rvtb5.mongodb.net/travel_app?retryWrites=true&w=majority&appName=userAuth"
-def connect_mongo(uri, retries=3, retry_delay=2):
-    """Attempts to connect to MongoDB with improved retry logic."""
-    for attempt in range(retries):
-        try:
-            client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=5000)
-            client.server_info()  # Force connection check
-            logger.info("✅ MongoDB connection established!")
-            return client
-        except Exception as e:
-            if attempt < retries - 1:
-                logger.warning(f"❌ MongoDB connection failed (Attempt {attempt + 1}/{retries}): {e}")
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                logger.error(f"❌ MongoDB connection failed after {retries} attempts: {e}")
-                raise Exception(f"❌ MongoDB connection failed after {retries} attempts: {e}")
-
+MONGO_URI = f"mongodb+srv://shehabwww153:{encoded_password}@userauth.rvtb5.mongodb.net/travel_app?retryWrites=true&w=majority&appName=userAuth"
 client = connect_mongo(MONGO_URI)
 db = client["travel_app"]
 

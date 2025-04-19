@@ -4224,15 +4224,21 @@ async def get_recommendations(
         # Combine new and previously shown recommendations
         all_recommendations = recommendation_data["new_recommendations"] + recommendation_data["previously_shown"]
         
-        # Check if we need to regenerate cache
+        # Check if we need to regenerate cache - now using task_manager
         if background_tasks:
             cache_count = recommendations_cache_collection.count_documents({"user_id": user_id})
             if cache_count < 4:
-                # Schedule cache regeneration in background
+                # Schedule cache regeneration with LOW priority
                 logger.info(f"Cache count low ({cache_count}), scheduling regeneration")
-                background_tasks.add_task(background_cache_recommendations, user_id, 6)
+                task_manager.schedule_task(
+                    background_tasks,
+                    TaskPriority.LOW,
+                    background_cache_recommendations,
+                    user_id, 
+                    6
+                )
         
-        # Handle translation if requested
+        # Handle translation if requested (this part remains unchanged)
         target_language = language
         translated = False
         
@@ -4279,7 +4285,7 @@ async def get_recommendations(
                 translated = True
                 logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
         
-        # Return recommendations
+        # Return recommendations (unchanged)
         return {
             "success": True,
             "user_id": user_id,

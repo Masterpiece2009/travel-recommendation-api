@@ -22,6 +22,77 @@ import hashlib
 from langdetect import detect
 from deep_translator import GoogleTranslator
 import copy
+# --- Task Priority System ---
+class TaskPriority:
+    """Priority levels for background tasks"""
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+class TaskManager:
+    """Simple task manager with priority handling"""
+    def __init__(self):
+        # Track concurrent tasks by priority
+        self.running_tasks = {
+            TaskPriority.HIGH: 0,
+            TaskPriority.MEDIUM: 0,
+            TaskPriority.LOW: 0
+        }
+        
+        # Define limits for each priority
+        self.limits = {
+            TaskPriority.HIGH: 5,   # Allow 5 high priority tasks
+            TaskPriority.MEDIUM: 3, # Allow 3 medium priority tasks
+            TaskPriority.LOW: 2     # Allow 2 low priority tasks
+        }
+        
+        # Create asyncio semaphores for concurrency control
+        self.semaphores = {}
+        for priority, limit in self.limits.items():
+            self.semaphores[priority] = asyncio.Semaphore(limit)
+        
+        logger.info(f"Task manager initialized with limits: {self.limits}")
+    
+    async def run_task(self, priority, func, *args, **kwargs):
+        """Run a task with specified priority"""
+        # Default to LOW if invalid priority
+        if priority not in self.semaphores:
+            logger.warning(f"Invalid priority: {priority}, using LOW")
+            priority = TaskPriority.LOW
+        
+        # Use semaphore to limit concurrent execution
+        async with self.semaphores[priority]:
+            start_time = datetime.now()
+            self.running_tasks[priority] += 1
+            logger.info(f"Starting {priority} task: {func.__name__} (running: {self.running_tasks})")
+            
+            try:
+                # Run function based on whether it's async or not
+                if asyncio.iscoroutinefunction(func):
+                    result = await func(*args, **kwargs)
+                else:
+                    # Run non-async functions in thread pool
+                    result = await asyncio.to_thread(func, *args, **kwargs)
+                
+                duration = (datetime.now() - start_time).total_seconds()
+                logger.info(f"Completed {priority} task: {func.__name__} in {duration:.2f}s")
+                return result
+            except Exception as e:
+                logger.error(f"Error in {priority} task {func.__name__}: {str(e)}")
+                raise
+            finally:
+                self.running_tasks[priority] -= 1
+    
+    def schedule_task(self, background_tasks, priority, func, *args, **kwargs):
+        """Schedule a task to run in the background with priority"""
+        async def wrapped_task():
+            await self.run_task(priority, func, *args, **kwargs)
+        
+        background_tasks.add_task(wrapped_task)
+        logger.info(f"Scheduled {priority} background task: {func.__name__}")
+
+# Create a global instance
+task_manager = TaskManager()
 def is_likely_english(text):
     """
     Helper function to determine if text is likely English based on character patterns

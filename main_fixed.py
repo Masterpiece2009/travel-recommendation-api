@@ -3040,6 +3040,17 @@ async def background_cache_recommendations(user_id, num_entries=6):
         for i in range(num_entries):
             if entries_created >= num_entries:
                 break
+            
+            # Enhanced yield point - check if high priority tasks are running
+            # This helps give priority to interactive requests
+            high_priority_count = task_manager.running_tasks[TaskPriority.HIGH]
+            if high_priority_count > 0:
+                # Longer delay if high priority tasks are running
+                logger.info(f"Yielding to {high_priority_count} high priority tasks")
+                await asyncio.sleep(1.0)  # Longer yield when HIGH priority tasks are running
+            else:
+                # Short delay between iterations to allow other tasks to run
+                await asyncio.sleep(0.1)
                 
             try:
                 # Check if we need more recommendations
@@ -3112,8 +3123,12 @@ async def background_cache_recommendations(user_id, num_entries=6):
                 entries_created += 1
                 logger.info(f"Generated cache entry {entries_created}/{num_entries} for user {user_id} (sequence {sequence})")
                 
-                # Add a delay between generations for variety
-                await asyncio.sleep(0.5)
+                # Add a delay between generations for variety - enhanced to check task priority
+                delay = 0.5
+                if task_manager.running_tasks[TaskPriority.HIGH] > 0:
+                    # Longer delay if high priority tasks are running
+                    delay = 1.0
+                await asyncio.sleep(delay)
                 
             except Exception as entry_error:
                 logger.error(f"Error generating cache entry {i+1}/{num_entries}: {entry_error}")

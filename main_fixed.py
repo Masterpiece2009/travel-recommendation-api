@@ -3718,8 +3718,8 @@ def generate_hybrid_roadmap(user_id):
                 
                 places_in_cat = category_groups.get(category, [])
                 if places_in_cat:
-                    # Sort by rating for each category
-                    places_in_cat.sort(key=lambda p: float(p.get("rating", 0)), reverse=True)
+                    # Sort by rating for each category - FIXED: using average_rating with extract_numeric
+                    places_in_cat.sort(key=lambda p: extract_numeric(p.get("average_rating", 0)), reverse=True)
                     
                     # Add top rated from category
                     place = places_in_cat[0]
@@ -3777,7 +3777,7 @@ def generate_hybrid_roadmap(user_id):
                 
                 selected_place_ids.add(place["_id"])
                 added += 1
-                logger.info(f"Added top rated: {place.get('name')} (rating: {extract_numeric(place.get('average_rating', 'N/A'))}")
+                logger.info(f"Added top rated: {place.get('name')} (rating: {extract_numeric(place.get('average_rating', 'N/A'))})")  # FIXED: Added closing parenthesis
     
     # --- FALLBACK MECHANISMS ---
     # If we still don't have 10 places, implement fallbacks
@@ -3875,29 +3875,29 @@ def generate_hybrid_roadmap(user_id):
             except Exception as e:
                 logger.error(f"Error getting fallback trending places: {str(e)}")
         
-        # FALLBACK 3: Top rated places (last resort)
-        if len(mixed_recommendations) < 10:
-            logger.info("Using top rated fallback")
-            
-            remaining_places = [p for p in all_places if p["_id"] not in selected_place_ids]
-            remaining_places.sort(key=lambda p: float(p.get("rating", 0)), reverse=True)
-            
-            for place in remaining_places:
-                if len(mixed_recommendations) >= 10:
-                    break
-                    
-                mixed_recommendations.append({
-                    "place": place,
-                    "score": 0.3,  # Low score for last resort
-                    "budget_score": 0.5,
-                    "accessibility_score": 0.5,
-                    "group_score": 0.5,
-                    "seasonal_score": 0.5,
-                    "source": "fallback_outside_destination"
-                })
-                selected_place_ids.add(place["_id"])
-                logger.info(f"Added fallback top rated: {place.get('name')}")
+# FALLBACK 3: Top rated places (last resort)
+if len(mixed_recommendations) < 10:
+    logger.info("Using top rated fallback")
     
+    remaining_places = [p for p in all_places if p["_id"] not in selected_place_ids]
+    # FIXED: using average_rating with extract_numeric
+    remaining_places.sort(key=lambda p: extract_numeric(p.get("average_rating", 0)), reverse=True)
+    
+    for place in remaining_places:
+        if len(mixed_recommendations) >= 10:
+            break
+            
+        mixed_recommendations.append({
+            "place": place,
+            "score": 0.3,  # Low score for last resort
+            "budget_score": 0.5,
+            "accessibility_score": 0.5,
+            "group_score": 0.5,
+            "seasonal_score": 0.5,
+            "source": "fallback_outside_destination"
+        })
+        selected_place_ids.add(place["_id"])
+        logger.info(f"Added fallback top rated: {place.get('name')}")
     # Ensure we have exactly 10 places (trim if more than 10)
     if len(mixed_recommendations) > 10:
         mixed_recommendations = mixed_recommendations[:10]

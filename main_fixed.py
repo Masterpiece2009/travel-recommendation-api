@@ -4355,18 +4355,22 @@ async def create_recommendations(request: RecommendationRequest, background_task
             status_code=500,
             content={"success": False, "error": str(e)}
         )
-
 @app.post("/cache/generate/{user_id}")
 async def force_cache_generation(
     user_id: str, 
     background_tasks: BackgroundTasks,
-    num_entries: int = Query(6, ge=1, le=20)
+    num_entries: int = Query(6, ge=1, le=20),
+    priority: str = Query(TaskPriority.MEDIUM, description="Task priority level")
 ):
     """
     Force cache generation for a user
     
     This is an admin endpoint to trigger cache generation
     """
+    # Validate priority
+    if priority not in [TaskPriority.HIGH, TaskPriority.MEDIUM, TaskPriority.LOW]:
+        priority = TaskPriority.MEDIUM
+        
     # Check if generation is already in progress
     cache_lock_key = f"cache_lock_{user_id}"
     lock = cache_locks_collection.find_one({"_id": cache_lock_key})
@@ -4386,12 +4390,18 @@ async def force_cache_generation(
                 "message": f"Cache generation already in progress for user {user_id}"
             }
     
-    # Schedule cache generation
-    background_tasks.add_task(background_cache_recommendations, user_id, num_entries)
+    # Schedule cache generation with specified priority
+    task_manager.schedule_task(
+        background_tasks,
+        priority,
+        background_cache_recommendations,
+        user_id,
+        num_entries
+    )
     
     return {
         "success": True,
-        "message": f"Started generation of {num_entries} cache entries for user {user_id}"
+        "message": f"Started {priority} priority generation of {num_entries} cache entries for user {user_id}"
     }
 
 @app.get("/cache/status/{user_id}")

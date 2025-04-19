@@ -3429,7 +3429,7 @@ def generate_hybrid_roadmap(user_id):
         Dictionary containing roadmap data with exactly 10 places
     """
 
-    def generate_hybrid_roadmap(user_id):
+    
     """
     Generate a travel roadmap for a user using a hybrid approach with mixed recommendation strategies.
     ...

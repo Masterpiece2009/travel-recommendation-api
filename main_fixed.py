@@ -3455,34 +3455,7 @@ def generate_hybrid_roadmap(user_id):
             return float(value)
         except (TypeError, ValueError):
             return default
-def generate_hybrid_roadmap(user_id):
-    """
-    Generate a travel roadmap for a user using a hybrid approach with mixed recommendation strategies.
-    ...
-    """
-    # Helper function to safely extract numeric values from MongoDB data
-    def extract_numeric(value, default=0):
-        if isinstance(value, dict):
-            # Handle MongoDB numeric types
-            if "$numberDouble" in value:
-                return float(value["$numberDouble"])
-            if "$numberInt" in value:
-                return float(int(value["$numberInt"]))
-            if "$numberLong" in value:
-                return float(int(value["$numberLong"]))
-            return default
-        
-        # Handle direct numeric types
-        if isinstance(value, (int, float)):
-            return float(value)
-        
-        # Try converting string to float
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
     
-
     logger.info(f"Generating roadmap for user {user_id}")
     
     # Get user info

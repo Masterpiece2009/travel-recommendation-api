@@ -51,6 +51,7 @@ class TaskManager:
         for priority, limit in self.limits.items():
             self.semaphores[priority] = asyncio.Semaphore(limit)
         
+        # Using global logger
         logger.info(f"Task manager initialized with limits: {self.limits}")
     
     async def run_task(self, priority, func, *args, **kwargs):

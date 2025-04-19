@@ -4864,8 +4864,12 @@ async def get_roadmap(user_id: str, language: str = None):
     try:
         logger.info(f"Roadmap request for user {user_id}")
         
-        # Get roadmap (cached or newly generated)
-        roadmap_data = await get_roadmap_with_caching(user_id)
+        # Get roadmap (cached or newly generated) - now using task_manager with HIGH priority
+        roadmap_data = await task_manager.run_task(
+            TaskPriority.HIGH,
+            get_roadmap_with_caching, 
+            user_id
+        )
         
         # Simplify to list format
         simplified_list = simplify_roadmap_to_list(roadmap_data)

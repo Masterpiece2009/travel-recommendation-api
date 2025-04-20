@@ -84,6 +84,9 @@ def detect_language(text):
         if not text or len(text.strip()) == 0:
             return "en"
         
+        # Define english_pattern at the beginning to avoid reference before assignment
+        english_pattern = re.compile(r'^[a-zA-Z\s\'\-,.!?]+$')
+        
         # Normalize text for comparison
         normalized_text = text.lower().strip()
         
@@ -162,7 +165,6 @@ def detect_language(text):
         if len(normalized_text) < 10:
             # These short text detection rules help avoid common misdetections
             # English specific patterns (most English words only use these characters)
-            english_pattern = re.compile(r'^[a-zA-Z\s\'\-,.!?]+$')
             if english_pattern.match(normalized_text):
                 # Check if text contains common English word patterns
                 english_word_pattern = re.compile(r'\b(the|and|to|of|in|is|it|that|for|on|with|as|at|by|this|from)\b', re.IGNORECASE)
@@ -195,7 +197,6 @@ def detect_language(text):
     except Exception as e:
         logger.warning(f"Language detection failed: {e}")
         return "en"  # Default to English if detection fails
-
 def translate_from_english(text, target_lang):
     """
     Translate text from English to target language.

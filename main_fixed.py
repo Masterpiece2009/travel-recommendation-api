@@ -314,6 +314,42 @@ def translate_roadmap_results(roadmap_list, target_language):
         logger.info(f"Translating roadmap results to {target_language}")
         translated_results = []
         
+        # Dictionary of landmark types in different languages
+        landmark_types = {
+            "fr": {
+                "Château": "castle/palace",
+                "Palais": "palace",
+                "Cathédrale": "cathedral",
+                "Musée": "museum",
+                "Basilique": "basilica",
+                "Église": "church",
+                "Tour": "tower",
+                "Pont": "bridge"
+            },
+            "es": {
+                "Palacio": "palace",
+                "Catedral": "cathedral",
+                "Museo": "museum",
+                "Iglesia": "church",
+                "Puente": "bridge"
+            },
+            "it": {
+                "Palazzo": "palace",
+                "Cattedrale": "cathedral",
+                "Museo": "museum",
+                "Chiesa": "church",
+                "Ponte": "bridge"
+            },
+            "de": {
+                "Schloss": "castle",
+                "Palast": "palace",
+                "Dom": "cathedral",
+                "Museum": "museum",
+                "Kirche": "church",
+                "Brücke": "bridge"
+            }
+        }
+        
         for item in roadmap_list:
             # Deep copy to avoid modifying the original
             translated_item = copy.deepcopy(item)
@@ -322,27 +358,127 @@ def translate_roadmap_results(roadmap_list, target_language):
             if "place" in translated_item:
                 place = translated_item["place"]
                 
-                # Improve name translation with language detection
+                # Improved place name translation
                 if "name" in place and isinstance(place["name"], str):
                     name = place["name"]
-                    
-                    # Check if name is already in the target language or in a non-English language
                     name_language = detect_language(name)
                     
-                    if name_language == "en" or name_language == "und":
-                        # If name is English or undetermined, translate from English
-                        place["name"] = translate_from_english(name, target_language)
-                        logger.info(f"Translated name from English: {name} -> {place['name']}")
-                    elif name_language != target_language:
-                        # If name is in a different language (not English, not target language)
-                        # First translate to English, then to target language
-                        english_name = translate_to_english(name)
-                        place["name"] = translate_from_english(english_name, target_language)
-                        logger.info(f"Translated name via English: {name} ({name_language}) -> {english_name} -> {place['name']}")
-                    # If name is already in target language, leave it as is
-                    else:
+                    # If already in target language, skip translation
+                    if name_language == target_language:
                         logger.info(f"Name already in target language ({name_language}): {name}")
+                        continue
                     
+                    # Check if it's a landmark name in a known language
+                    is_landmark = False
+                    english_landmark_type = None
+                    proper_name = None
+                    
+                    # Identify if this is a landmark and get its type
+                    if name_language in landmark_types:
+                        for landmark in landmark_types[name_language]:
+                            if name.startswith(landmark):
+                                is_landmark = True
+                                english_landmark_type = landmark_types[name_language][landmark]
+                                
+                                # Extract the proper name portion
+                                proper_name = name[len(landmark):].strip()
+                                
+                                # Handle common prepositions
+                                if name_language == "fr" and proper_name.startswith("de "):
+                                    proper_name = proper_name[3:].strip()
+                                elif name_language == "fr" and proper_name.startswith("du "):
+                                    proper_name = proper_name[3:].strip()
+                                elif name_language == "es" and proper_name.startswith("de "):
+                                    proper_name = proper_name[3:].strip()
+                                elif name_language == "it" and proper_name.startswith("di "):
+                                    proper_name = proper_name[3:].strip()
+                                elif name_language == "de" and proper_name.startswith("von "):
+                                    proper_name = proper_name[4:].strip()
+                                
+                                break
+                    
+                    # Translation strategy based on name type
+                    if is_landmark:
+                        # Strategy 1: Try direct translation from source language
+                        try:
+                            from deep_translator import GoogleTranslator
+                            direct_translated = GoogleTranslator(source=name_language, target=target_language).translate(name)
+                            
+                            # If direct translation succeeded and changed the text
+                            if direct_translated != name:
+                                place["name"] = direct_translated
+                                logger.info(f"Directly translated landmark name: {name} -> {place['name']}")
+                            else:
+                                # Strategy 2: Translate landmark type and proper name separately
+                                translated_type = translate_from_english(english_landmark_type, target_language)
+                                translated_proper_name = None
+                                
+                                # Try to preserve proper names unless they have meaning
+                                if proper_name:
+                                    proper_name_language = detect_language(proper_name)
+                                    # If proper name is detectable as a language, translate it
+                                    if proper_name_language != "und":
+                                        if proper_name_language == "en":
+                                            translated_proper_name = translate_from_english(proper_name, target_language)
+                                        else:
+                                            english_proper_name = translate_to_english(proper_name)
+                                            translated_proper_name = translate_from_english(english_proper_name, target_language)
+                                    else:
+                                        # Keep proper names as is
+                                        translated_proper_name = proper_name
+                                
+                                # Combine translated parts
+                                if translated_proper_name:
+                                    place["name"] = f"{translated_type} {translated_proper_name}"
+                                else:
+                                    place["name"] = translated_type
+                                
+                                logger.info(f"Translated landmark name by parts: {name} -> {place['name']}")
+                        except Exception as e:
+                            logger.warning(f"Direct landmark translation failed: {e}, falling back to standard method")
+                            # Fall back to standard method
+                            if name_language == "en":
+                                place["name"] = translate_from_english(name, target_language)
+                            else:
+                                english_name = translate_to_english(name)
+                                place["name"] = translate_from_english(english_name, target_language)
+                    else:
+                        # Standard translation path for regular place names
+                        if name_language == "en" or name_language == "und":
+                            place["name"] = translate_from_english(name, target_language)
+                            logger.info(f"Translated name from English: {name} -> {place['name']}")
+                        else:
+                            # Try direct translation first for known languages
+                            try_direct = False
+                            
+                            # Some language pairs work better with direct translation
+                            if name_language in ["fr", "es", "de", "it", "ja", "zh", "ru", "ar"]:
+                                try_direct = True
+                            
+                            if try_direct:
+                                try:
+                                    from deep_translator import GoogleTranslator
+                                    direct_translated = GoogleTranslator(source=name_language, target=target_language).translate(name)
+                                    if direct_translated != name:
+                                        place["name"] = direct_translated
+                                        logger.info(f"Directly translated name: {name} -> {place['name']}")
+                                    else:
+                                        # Fall back to English as intermediary
+                                        english_name = translate_to_english(name)
+                                        place["name"] = translate_from_english(english_name, target_language)
+                                        logger.info(f"Translated name via English: {name} ({name_language}) -> {english_name} -> {place['name']}")
+                                except Exception:
+                                    # Fall back to English as intermediary
+                                    english_name = translate_to_english(name)
+                                    place["name"] = translate_from_english(english_name, target_language)
+                                    logger.info(f"Translated name via English: {name} ({name_language}) -> {english_name} -> {place['name']}")
+                            else:
+                                # Standard path via English
+                                english_name = translate_to_english(name)
+                                place["name"] = translate_from_english(english_name, target_language)
+                                logger.info(f"Translated name via English: {name} ({name_language}) -> {english_name} -> {place['name']}")
+                
+                # Rest of the translation function remains unchanged
                 # Improve description translation with language detection
                 if "description" in place and isinstance(place["description"], str):
                     description = place["description"]

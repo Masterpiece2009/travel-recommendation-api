@@ -4105,12 +4105,29 @@ def simplify_roadmap_to_list(roadmap_data):
         # Get the route to the next place if available
         next_route = next_stops.get(place_id, {})
         
-        # Create simplified entry
+        # Create a simplified place object matching the document structure
+        simplified_place = {
+            "name": place.get("name"),
+            "category": place.get("category"),
+            "tags": place.get("tags", []),
+            "description": place.get("description"),
+            "location": {
+                "city": place.get("location", {}).get("city"),
+                "country": place.get("location", {}).get("country")
+            },
+            "accessibility": place.get("accessibility", []),  # This is now a top-level field
+            "average_rating": place.get("average_rating"),
+            "likes": place.get("likes"),
+            "reviews_count": place.get("reviews_count"),
+            "appropriate_time": place.get("appropriate_time", []),
+            "budget": place.get("budget"),
+            "group_type": place.get("group_type")
+        }
+        
+        # Create simplified entry with only place and next destination
         entry = {
-            "place": place,
-            "next_destination": next_route.get("to_name") if next_route else None,
-            "next_id": next_route.get("to") if next_route else None,
-            "match_scores": place.get("match_scores", {})
+            "place": simplified_place,
+            "next_destination": next_route.get("to_name") if next_route else None
         }
         
         simplified.append(entry)

@@ -4655,21 +4655,33 @@ async def get_recommendations(
                                     else:
                                         # Strategy 2: Translate landmark type and proper name separately
                                         translated_type = translate_from_english(english_landmark_type, target_language)
-                                        translated_proper_name = None
                                         
-                                        # Try to preserve proper names unless they have meaning
+                                        # Always attempt to transliterate proper names for Arabic target language
+                                        # This will convert "Vaux-le-Vicomte" to Arabic characters
                                         if proper_name:
-                                            proper_name_language = detect_language(proper_name)
-                                            # If proper name is detectable as a language, translate it
-                                            if proper_name_language != "und":
-                                                if proper_name_language == "en":
-                                                    translated_proper_name = translate_from_english(proper_name, target_language)
+                                            try:
+                                                # For Arabic target, we want to transliterate proper names 
+                                                if target_language == "ar":
+                                                    # Use GoogleTranslator for transliteration
+                                                    transliterated_name = GoogleTranslator(source=name_language, target="ar").translate(proper_name)
+                                                    
+                                                    # If we got something back that's clearly different
+                                                    if transliterated_name and transliterated_name != proper_name:
+                                                        translated_proper_name = transliterated_name
+                                                        logger.info(f"Transliterated proper name to Arabic: {proper_name} -> {translated_proper_name}")
+                                                    else:
+                                                        # If transliteration failed, try character by character approach
+                                                        # This is a simplified approach - in production you might use a more sophisticated transliteration library
+                                                        translated_proper_name = proper_name
+                                                        logger.warning(f"Transliteration failed, using original: {proper_name}")
                                                 else:
-                                                    english_proper_name = translate_to_english(proper_name)
-                                                    translated_proper_name = translate_from_english(english_proper_name, target_language)
-                                            else:
-                                                # Keep proper names as is
+                                                    # For non-Arabic languages, keep original proper names
+                                                    translated_proper_name = proper_name
+                                            except Exception as e:
+                                                logger.warning(f"Error transliterating proper name: {e}, keeping original")
                                                 translated_proper_name = proper_name
+                                        else:
+                                            translated_proper_name = None
                                         
                                         # Combine translated parts
                                         if translated_proper_name:

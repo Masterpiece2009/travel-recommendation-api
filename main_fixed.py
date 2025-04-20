@@ -307,6 +307,10 @@ def translate_roadmap_results(roadmap_list, target_language):
     - Translated roadmap list
     """
     try:
+        # Skip translation if no target language or if no items to translate
+        if not roadmap_list or not target_language or target_language in ['en', 'und']:
+            return roadmap_list
+            
         logger.info(f"Translating roadmap results to {target_language}")
         translated_results = []
         
@@ -317,67 +321,150 @@ def translate_roadmap_results(roadmap_list, target_language):
             # Translate place details
             if "place" in translated_item:
                 place = translated_item["place"]
-                if "name" in place and isinstance(place["name"], str):
-                    place["name"] = translate_from_english(place["name"], target_language)
-                    
-                if "description" in place and isinstance(place["description"], str):
-                    place["description"] = translate_from_english(place["description"], target_language)
-                    
-                if "location" in place and "city" in place["location"] and isinstance(place["location"]["city"], str):
-                    place["location"]["city"] = translate_from_english(place["location"]["city"], target_language)
-                    
-                if "location" in place and "country" in place["location"] and isinstance(place["location"]["country"], str):
-                    place["location"]["country"] = translate_from_english(place["location"]["country"], target_language)
                 
-                # Translate tags if they're human-readable (not machine codes)
+                # Improve name translation with language detection
+                if "name" in place and isinstance(place["name"], str):
+                    name = place["name"]
+                    
+                    # Check if name is already in the target language or in a non-English language
+                    name_language = detect_language(name)
+                    
+                    if name_language == "en" or name_language == "und":
+                        # If name is English or undetermined, translate from English
+                        place["name"] = translate_from_english(name, target_language)
+                        logger.info(f"Translated name from English: {name} -> {place['name']}")
+                    elif name_language != target_language:
+                        # If name is in a different language (not English, not target language)
+                        # First translate to English, then to target language
+                        english_name = translate_to_english(name)
+                        place["name"] = translate_from_english(english_name, target_language)
+                        logger.info(f"Translated name via English: {name} ({name_language}) -> {english_name} -> {place['name']}")
+                    # If name is already in target language, leave it as is
+                    else:
+                        logger.info(f"Name already in target language ({name_language}): {name}")
+                    
+                # Improve description translation with language detection
+                if "description" in place and isinstance(place["description"], str):
+                    description = place["description"]
+                    description_language = detect_language(description)
+                    
+                    if description_language == "en" or description_language == "und":
+                        place["description"] = translate_from_english(description, target_language)
+                    elif description_language != target_language:
+                        english_description = translate_to_english(description)
+                        place["description"] = translate_from_english(english_description, target_language)
+                
+                # Improve city translation with language detection
+                if "location" in place and "city" in place["location"] and isinstance(place["location"]["city"], str):
+                    city = place["location"]["city"]
+                    city_language = detect_language(city)
+                    
+                    if city_language == "en" or city_language == "und":
+                        place["location"]["city"] = translate_from_english(city, target_language)
+                    elif city_language != target_language:
+                        english_city = translate_to_english(city)
+                        place["location"]["city"] = translate_from_english(english_city, target_language)
+                
+                # Improve country translation with language detection
+                if "location" in place and "country" in place["location"] and isinstance(place["location"]["country"], str):
+                    country = place["location"]["country"]
+                    country_language = detect_language(country)
+                    
+                    if country_language == "en" or country_language == "und":
+                        place["location"]["country"] = translate_from_english(country, target_language)
+                    elif country_language != target_language:
+                        english_country = translate_to_english(country)
+                        place["location"]["country"] = translate_from_english(english_country, target_language)
+                
+                # Improve tags translation with language detection
                 if "tags" in place and isinstance(place["tags"], list):
                     translated_tags = []
                     for tag in place["tags"]:
                         if isinstance(tag, str):
-                            translated_tag = translate_from_english(tag, target_language)
+                            tag_language = detect_language(tag)
+                            
+                            if tag_language == "en" or tag_language == "und":
+                                translated_tag = translate_from_english(tag, target_language)
+                            elif tag_language != target_language:
+                                english_tag = translate_to_english(tag)
+                                translated_tag = translate_from_english(english_tag, target_language)
+                            else:
+                                translated_tag = tag
+                                
                             translated_tags.append(translated_tag)
                         else:
                             translated_tags.append(tag)
                     place["tags"] = translated_tags
                 
-                # Translate category if it's a human-readable string
+                # Improve category translation with language detection
                 if "category" in place and isinstance(place["category"], str):
-                    place["category"] = translate_from_english(place["category"], target_language)
+                    category = place["category"]
+                    category_language = detect_language(category)
+                    
+                    if category_language == "en" or category_language == "und":
+                        place["category"] = translate_from_english(category, target_language)
+                    elif category_language != target_language:
+                        english_category = translate_to_english(category)
+                        place["category"] = translate_from_english(english_category, target_language)
                 
-                # Translate accessibility features
+                # Improve accessibility features translation with language detection
                 if "accessibility" in place and isinstance(place["accessibility"], list):
                     translated_accessibility = []
                     for feature in place["accessibility"]:
                         if isinstance(feature, str):
-                            translated_feature = translate_from_english(feature, target_language)
+                            feature_language = detect_language(feature)
+                            
+                            if feature_language == "en" or feature_language == "und":
+                                translated_feature = translate_from_english(feature, target_language)
+                            elif feature_language != target_language:
+                                english_feature = translate_to_english(feature)
+                                translated_feature = translate_from_english(english_feature, target_language)
+                            else:
+                                translated_feature = feature
+                                
                             translated_accessibility.append(translated_feature)
                         else:
                             translated_accessibility.append(feature)
                     place["accessibility"] = translated_accessibility
                 
-                # Translate appropriate_time months if present
+                # Improve appropriate_time months translation with language detection
                 if "appropriate_time" in place and isinstance(place["appropriate_time"], list):
                     translated_months = []
                     for month in place["appropriate_time"]:
                         if isinstance(month, str):
-                            translated_month = translate_from_english(month, target_language)
+                            month_language = detect_language(month)
+                            
+                            if month_language == "en" or month_language == "und":
+                                translated_month = translate_from_english(month, target_language)
+                            elif month_language != target_language:
+                                english_month = translate_to_english(month)
+                                translated_month = translate_from_english(english_month, target_language)
+                            else:
+                                translated_month = month
+                                
                             translated_months.append(translated_month)
                         else:
                             translated_months.append(month)
                     place["appropriate_time"] = translated_months
             
-            # Translate next destination
+            # Improve next destination translation with language detection
             if "next_destination" in translated_item and isinstance(translated_item["next_destination"], str):
-                translated_item["next_destination"] = translate_from_english(translated_item["next_destination"], target_language)
+                next_destination = translated_item["next_destination"]
+                next_destination_language = detect_language(next_destination)
+                
+                if next_destination_language == "en" or next_destination_language == "und":
+                    translated_item["next_destination"] = translate_from_english(next_destination, target_language)
+                elif next_destination_language != target_language:
+                    english_next_destination = translate_to_english(next_destination)
+                    translated_item["next_destination"] = translate_from_english(english_next_destination, target_language)
             
             translated_results.append(translated_item)
         
-        logger.info(f"Translated {len(translated_results)} results to {target_language}")
+        logger.info(f"Translated {len(translated_results)} roadmap items to {target_language}")
         return translated_results
     except Exception as e:
         logger.error(f"Error translating roadmap results: {str(e)}")
         return roadmap_list  # Return original if translation fails
-
 # Define DummyNLP in global scope for fallback
 class DummyNLP:
     def __init__(self):

@@ -4265,16 +4265,6 @@ async def get_recommendations(
 ):
     """
     Get recommendations for a user with progressive pagination and translation support.
-    First request: Return 10 new places
-    Second request: Return 10 new places + previous 10 = 20 total
-    Third request and beyond: Return 10 new places + 20 most recent shown places = 30 total
-    
-    Args:
-        user_id: User ID
-        num: Number of NEW recommendations to return (default 10)
-        force_refresh: Whether to force fresh recommendations
-        translate_results: Whether to translate results to user's preferred language
-        language: Override language for translation (if not specified, uses user's last search language)
     """
     try:
         # Get recommendations with the enhanced progressive pagination
@@ -4301,9 +4291,8 @@ async def get_recommendations(
                     6
                 )
         
-        # Handle translation if requested (this part remains unchanged)
+        # Handle translation if requested
         target_language = language
-        translated = False
         
         if translate_results and len(all_recommendations) > 0:
             # If language not specified, try to determine from user's search history
@@ -4345,26 +4334,39 @@ async def get_recommendations(
                     translated_recommendations.append(translated_place)
                     
                 all_recommendations = translated_recommendations
-                translated = True
                 logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
         
-        # Return recommendations (unchanged)
-        return {
-            "success": True,
-            "user_id": user_id,
-            "count": len(all_recommendations),
-            "new_count": len(recommendation_data["new_recommendations"]),
-            "history_count": len(recommendation_data["previously_shown"]),
-            "recommendations": all_recommendations,
-            "cache_used": not force_refresh and len(recommendation_data["new_recommendations"]) > 0,
-            "translated": translated,
-            "language": target_language if translated else "en"
-        }
+        # Simplify place objects in recommendations
+        simplified_recommendations = []
+        for place in all_recommendations:
+            simplified_place = {
+                "_id": place.get("_id"),
+                "name": place.get("name"),
+                "category": place.get("category"),
+                "tags": place.get("tags", []),
+                "description": place.get("description"),
+                "location": {
+                    "city": place.get("location", {}).get("city"),
+                    "country": place.get("location", {}).get("country")
+                },
+                "accessibility": place.get("accessibility", []),
+                "average_rating": place.get("average_rating"),
+                "likes": place.get("likes"),
+                "reviews_count": place.get("reviews_count"),
+                "appropriate_time": place.get("appropriate_time", []),
+                "budget": place.get("budget"),
+                "group_type": place.get("group_type")
+            }
+            simplified_recommendations.append(simplified_place)
+        
+        # Return only the simplified recommendations array
+        return simplified_recommendations
+        
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")
         return JSONResponse(
             status_code=500,
-            content={"success": False, "error": str(e)}
+            content={"error": str(e)}
         )
 @app.post("/recommendations")
 async def create_recommendations(request: RecommendationRequest, background_tasks: BackgroundTasks):

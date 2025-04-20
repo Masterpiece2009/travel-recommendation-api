@@ -4340,7 +4340,6 @@ async def get_recommendations(
         simplified_recommendations = []
         for place in all_recommendations:
             simplified_place = {
-                "_id": place.get("_id"),
                 "name": place.get("name"),
                 "category": place.get("category"),
                 "tags": place.get("tags", []),

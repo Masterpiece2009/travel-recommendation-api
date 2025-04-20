@@ -4911,12 +4911,6 @@ async def clear_search_history(user_id: str):
 # --- Roadmap API Endpoints ---
 @app.get("/roadmap/{user_id}")
 async def get_roadmap(user_id: str, language: str = None):
-    """
-    Get a travel roadmap for a specific user
-    
-    Uses caching: Only regenerates if user's travel preferences have changed
-    Optional language parameter for translation
-    """
     try:
         logger.info(f"Roadmap request for user {user_id}")
         
@@ -4939,13 +4933,8 @@ async def get_roadmap(user_id: str, language: str = None):
             "success": True, 
             "user_id": user_id, 
             "count": len(simplified_list),
-            "data": simplified_list,
-            "metadata": {
-                "budget_level": roadmap_data.get("budget_level"),
-                "group_type": roadmap_data.get("group_type"),
-                "start_date": roadmap_data.get("start_date"),
-                "accessibility_needs": roadmap_data.get("accessibility_needs", [])
-            }
+            "data": simplified_list
+            # Entire metadata section removed
         }
     except Exception as e:
         logger.error(f"Error generating roadmap: {str(e)}")

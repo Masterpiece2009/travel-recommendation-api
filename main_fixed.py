@@ -4333,6 +4333,15 @@ def simplify_roadmap_to_list(roadmap_data):
         # Get the route to the next place if available
         next_route = next_stops.get(place_id, {})
         
+        # Extract and clean average_rating
+        average_rating = place.get("average_rating")
+        # Handle MongoDB formatted number
+        if isinstance(average_rating, dict) and "$numberDouble" in average_rating:
+            try:
+                average_rating = float(average_rating.get("$numberDouble"))
+            except (ValueError, TypeError):
+                average_rating = None
+        
         # Create a simplified place object matching the document structure
         simplified_place = {
             "name": place.get("name"),
@@ -4344,7 +4353,7 @@ def simplify_roadmap_to_list(roadmap_data):
                 "country": place.get("location", {}).get("country")
             },
             "accessibility": place.get("accessibility", []),  # This is now a top-level field
-            "average_rating": place.get("average_rating"),
+            "average_rating": average_rating,  # Use the cleaned value
             "likes": place.get("likes"),
             "reviews_count": place.get("reviews_count"),
             "appropriate_time": place.get("appropriate_time", []),

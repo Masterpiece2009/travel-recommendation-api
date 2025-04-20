@@ -4756,7 +4756,6 @@ async def search_places(
                 
                 # Only add results with a minimum relevance
                 if final_score > 0.3:  # Threshold for relevance
-                    place["search_score"] = final_score
                     results.append({
                         "place": place,
                         "score": final_score
@@ -4783,8 +4782,6 @@ async def search_places(
                     score = 0.5
                     
                 if score > 0:
-                    # Add to results with score
-                    place["search_score"] = score
                     results.append({
                         "place": place,
                         "score": score
@@ -4794,13 +4791,13 @@ async def search_places(
         sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)[:limit]
         
         # Extract just the place data
-        final_results = [item["place"] for item in sorted_results]
+        places_only = [item["place"] for item in sorted_results]
         
         # Translate results back to original language if requested
-        if translate_results and detected_language not in ['en', 'und'] and len(final_results) > 0:
-            translated_results = []
+        if translate_results and detected_language not in ['en', 'und'] and len(places_only) > 0:
+            translated_places = []
             
-            for place in final_results:
+            for place in places_only:
                 # Create a copy of the place to modify
                 translated_place = dict(place)
                 
@@ -4821,28 +4818,42 @@ async def search_places(
                         for tag in place["tags"]
                     ]
                 
-                translated_results.append(translated_place)
+                translated_places.append(translated_place)
                 
-            final_results = translated_results
-            logger.info(f"Translated {len(final_results)} results to {detected_language}")
+            places_only = translated_places
+            logger.info(f"Translated {len(places_only)} results to {detected_language}")
         
-        # Include translation info in response
-        return {
-            "success": True,
-            "user_id": user_id,
-            "query": original_query,
-            "translated_query": query if detected_language != 'en' else None,
-            "detected_language": detected_language,
-            "count": len(final_results),
-            "results": final_results,
-            "translated_results": translate_results and detected_language not in ['en', 'und']
-        }
+        # Simplify the place objects in the final results
+        simplified_results = []
+        for place in places_only:
+            simplified_place = {
+                "_id": place.get("_id"),
+                "name": place.get("name"),
+                "category": place.get("category"),
+                "tags": place.get("tags", []),
+                "description": place.get("description"),
+                "location": {
+                    "city": place.get("location", {}).get("city"),
+                    "country": place.get("location", {}).get("country")
+                },
+                "accessibility": place.get("accessibility", []),
+                "average_rating": place.get("average_rating"),
+                "likes": place.get("likes"),
+                "reviews_count": place.get("reviews_count"),
+                "appropriate_time": place.get("appropriate_time", []),
+                "budget": place.get("budget"),
+                "group_type": place.get("group_type")
+            }
+            simplified_results.append(simplified_place)
+        
+        # Return just the simplified array of places
+        return simplified_results
         
     except Exception as e:
         logger.error(f"Error searching places: {str(e)}")
         return JSONResponse(
             status_code=500,
-            content={"success": False, "error": str(e)}
+            content={"error": str(e)}
         )
 @app.get("/search-history/{user_id}")
 async def get_search_history(

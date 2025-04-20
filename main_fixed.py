@@ -2112,13 +2112,15 @@ def get_discovery_places(user_id, limit=10):
                     "category": {"$nin": preferred_categories}
                 }
             },
+            # Use $convert to safely convert rating to double
             {
                 "$addFields": {
                     "numeric_rating": {
-                        "$cond": {
-                            "if": {"$eq": [{"$type": "$average_rating"}, "object"]},
-                            "then": "$average_rating.$numberDouble",
-                            "else": "$average_rating"
+                        "$convert": {
+                            "input": "$average_rating",
+                            "to": "double",
+                            "onError": 0,
+                            "onNull": 0
                         }
                     }
                 }
@@ -2146,13 +2148,15 @@ def get_discovery_places(user_id, limit=10):
                         "category": {"$nin": preferred_categories}
                     }
                 },
+                # Use $convert for the fallback pipeline too
                 {
                     "$addFields": {
                         "numeric_rating": {
-                            "$cond": {
-                                "if": {"$eq": [{"$type": "$average_rating"}, "object"]},
-                                "then": "$average_rating.$numberDouble",
-                                "else": "$average_rating"
+                            "$convert": {
+                                "input": "$average_rating",
+                                "to": "double",
+                                "onError": 0,
+                                "onNull": 0
                             }
                         }
                     }

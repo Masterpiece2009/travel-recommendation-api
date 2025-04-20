@@ -4843,6 +4843,12 @@ async def get_recommendations(
         # Simplify place objects in recommendations
         simplified_recommendations = []
         for place in all_recommendations:
+             average_rating = place.get("average_rating")
+            if isinstance(average_rating, dict) and "$numberDouble" in average_rating:
+                  try:
+                       average_rating = float(average_rating.get("$numberDouble"))
+                  except (ValueError, TypeError):
+                      average_rating = None
             simplified_place = {
                 "name": place.get("name"),
                 "category": place.get("category"),

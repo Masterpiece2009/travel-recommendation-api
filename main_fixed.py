@@ -4310,26 +4310,96 @@ async def get_recommendations(
             if target_language and target_language not in ['en', 'und']:
                 translated_recommendations = []
                 
+                import copy
+                
                 for place in all_recommendations:
-                    # Create a copy of the place to modify
-                    translated_place = dict(place)
+                    # Deep copy to avoid modifying the original
+                    translated_place = copy.deepcopy(place)
                     
-                    # Translate key fields
-                    if "name" in place:
-                        translated_place["name"] = translate_from_english(place["name"], target_language)
+                    # Improve name translation with language detection
+                    if "name" in translated_place and isinstance(translated_place["name"], str):
+                        name = translated_place["name"]
                         
-                    if "description" in place:
-                        translated_place["description"] = translate_from_english(place["description"], target_language)
+                        # Check if name is already in the target language or in a non-English language
+                        name_language = detect_language(name)
                         
-                    if "category" in place:
-                        translated_place["category"] = translate_from_english(place["category"], target_language)
+                        if name_language == "en" or name_language == "und":
+                            # If name is English or undetermined, translate from English
+                            translated_place["name"] = translate_from_english(name, target_language)
+                            logger.info(f"Translated name from English: {name} -> {translated_place['name']}")
+                        elif name_language != target_language:
+                            # If name is in a different language (not English, not target language)
+                            # First translate to English, then to target language
+                            english_name = translate_to_english(name)
+                            translated_place["name"] = translate_from_english(english_name, target_language)
+                            logger.info(f"Translated name via English: {name} ({name_language}) -> {english_name} -> {translated_place['name']}")
+                        # If name is already in target language, leave it as is
+                        else:
+                            logger.info(f"Name already in target language ({name_language}): {name}")
+                    
+                    # Description translation with type checking
+                    if "description" in translated_place and isinstance(translated_place["description"], str):
+                        description = translated_place["description"]
+                        description_language = detect_language(description)
                         
-                    # Translate tags if present
-                    if "tags" in place and isinstance(place["tags"], list):
-                        translated_place["tags"] = [
-                            translate_from_english(tag, target_language) 
-                            for tag in place["tags"]
-                        ]
+                        if description_language == "en" or description_language == "und":
+                            translated_place["description"] = translate_from_english(description, target_language)
+                        elif description_language != target_language:
+                            english_description = translate_to_english(description)
+                            translated_place["description"] = translate_from_english(english_description, target_language)
+                    
+                    # Category translation with type checking
+                    if "category" in translated_place and isinstance(translated_place["category"], str):
+                        category = translated_place["category"]
+                        category_language = detect_language(category)
+                        
+                        if category_language == "en" or category_language == "und":
+                            translated_place["category"] = translate_from_english(category, target_language)
+                        elif category_language != target_language:
+                            english_category = translate_to_english(category)
+                            translated_place["category"] = translate_from_english(english_category, target_language)
+                    
+                    # Tag translation with type checking
+                    if "tags" in translated_place and isinstance(translated_place["tags"], list):
+                        translated_tags = []
+                        for tag in translated_place["tags"]:
+                            if isinstance(tag, str):
+                                tag_language = detect_language(tag)
+                                
+                                if tag_language == "en" or tag_language == "und":
+                                    translated_tag = translate_from_english(tag, target_language)
+                                elif tag_language != target_language:
+                                    english_tag = translate_to_english(tag)
+                                    translated_tag = translate_from_english(english_tag, target_language)
+                                else:
+                                    translated_tag = tag
+                                    
+                                translated_tags.append(translated_tag)
+                            else:
+                                translated_tags.append(tag)
+                        translated_place["tags"] = translated_tags
+                    
+                    # Location fields translation
+                    if "location" in translated_place and isinstance(translated_place["location"], dict):
+                        if "city" in translated_place["location"] and isinstance(translated_place["location"]["city"], str):
+                            city = translated_place["location"]["city"]
+                            city_language = detect_language(city)
+                            
+                            if city_language == "en" or city_language == "und":
+                                translated_place["location"]["city"] = translate_from_english(city, target_language)
+                            elif city_language != target_language:
+                                english_city = translate_to_english(city)
+                                translated_place["location"]["city"] = translate_from_english(english_city, target_language)
+                        
+                        if "country" in translated_place["location"] and isinstance(translated_place["location"]["country"], str):
+                            country = translated_place["location"]["country"]
+                            country_language = detect_language(country)
+                            
+                            if country_language == "en" or country_language == "und":
+                                translated_place["location"]["country"] = translate_from_english(country, target_language)
+                            elif country_language != target_language:
+                                english_country = translate_to_english(country)
+                                translated_place["location"]["country"] = translate_from_english(english_country, target_language)
                     
                     translated_recommendations.append(translated_place)
                     

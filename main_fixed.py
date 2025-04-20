@@ -4596,6 +4596,30 @@ async def get_recommendations(
                     }
                 }
                 
+                # Dictionary of known French chateau names and their Arabic transliterations
+                known_transliterations = {
+                    "ar": {
+                        "Vaux-le-Vicomte": "فو لو فيكونت",
+                        "Fontainebleau": "فونتينبلو",
+                        "Haut-Koenigsbourg": "هاوت-كونيغسبورغ",
+                        "Haut-kœnigsbourg": "هاوت-كونيغسبورغ",
+                        "Chenonceau": "شينونسو",
+                        "Chinonceau": "شينونسو",
+                        "Saumur": "سومور",
+                        "Tarascon": "تاراسكون",
+                        "Versailles": "فرساي",
+                        "Amboise": "أمبواز",
+                        "Blois": "بلوا",
+                        "Chambord": "شامبور",
+                        "Cheverny": "شيفيرني",
+                        "Carcassonne": "كاركاسون",
+                        "Longchamp": "لونجشامب",
+                        "Sully-sur-Loire": "سولي-سور-لوار",
+                        "Beauregard": "بوريجارد",
+                        "Chantilly": "شانتيي"
+                    }
+                }
+                
                 for place in all_recommendations:
                     # Deep copy to avoid modifying the original
                     translated_place = copy.deepcopy(place)
@@ -4643,42 +4667,46 @@ async def get_recommendations(
                             
                             # Translation strategy based on name type
                             if is_landmark:
-                                # Strategy 1: Try direct translation from source language
+                                # First try direct translation of full name
                                 try:
                                     from deep_translator import GoogleTranslator
                                     direct_translated = GoogleTranslator(source=name_language, target=target_language).translate(name)
                                     
                                     # If direct translation succeeded and changed the text
-                                    if direct_translated != name:
+                                    if direct_translated != name and not any(char in direct_translated for char in name if ord(char) < 128):
+                                        # Ensure the result doesn't contain any of the original Latin characters
                                         translated_place["name"] = direct_translated
                                         logger.info(f"Directly translated landmark name: {name} -> {translated_place['name']}")
                                     else:
-                                        # Strategy 2: Translate landmark type and proper name separately
+                                        # Strategy 2: Translate only the landmark type
                                         translated_type = translate_from_english(english_landmark_type, target_language)
                                         
-                                        # Always attempt to transliterate proper names for Arabic target language
-                                        # This will convert "Vaux-le-Vicomte" to Arabic characters
+                                        # Handle proper name translation or transliteration
                                         if proper_name:
-                                            try:
-                                                # For Arabic target, we want to transliterate proper names 
-                                                if target_language == "ar":
-                                                    # Use GoogleTranslator for transliteration
-                                                    transliterated_name = GoogleTranslator(source=name_language, target="ar").translate(proper_name)
-                                                    
-                                                    # If we got something back that's clearly different
-                                                    if transliterated_name and transliterated_name != proper_name:
-                                                        translated_proper_name = transliterated_name
-                                                        logger.info(f"Transliterated proper name to Arabic: {proper_name} -> {translated_proper_name}")
-                                                    else:
-                                                        # If transliteration failed, try character by character approach
-                                                        # This is a simplified approach - in production you might use a more sophisticated transliteration library
-                                                        translated_proper_name = proper_name
-                                                        logger.warning(f"Transliteration failed, using original: {proper_name}")
+                                            if target_language == "ar":
+                                                # Check if we have a known transliteration for this name
+                                                clean_proper_name = proper_name.strip()
+                                                if clean_proper_name in known_transliterations.get("ar", {}):
+                                                    translated_proper_name = known_transliterations["ar"][clean_proper_name]
+                                                    logger.info(f"Used known transliteration: {clean_proper_name} -> {translated_proper_name}")
                                                 else:
-                                                    # For non-Arabic languages, keep original proper names
-                                                    translated_proper_name = proper_name
-                                            except Exception as e:
-                                                logger.warning(f"Error transliterating proper name: {e}, keeping original")
+                                                    # Try to use translator for transliteration
+                                                    try:
+                                                        transliterated_name = GoogleTranslator(source=name_language, target="ar").translate(clean_proper_name)
+                                                        
+                                                        # Check if we got a valid Arabic transliteration (no Latin characters)
+                                                        if transliterated_name and not any(char in transliterated_name for char in clean_proper_name if ord(char) < 128):
+                                                            translated_proper_name = transliterated_name
+                                                            logger.info(f"Successfully transliterated: {clean_proper_name} -> {translated_proper_name}")
+                                                        else:
+                                                            # If transliteration has Latin chars, use original
+                                                            translated_proper_name = clean_proper_name
+                                                            logger.info(f"Transliteration failed, using original: {clean_proper_name}")
+                                                    except Exception as e:
+                                                        logger.warning(f"Error in transliteration: {e}, using original")
+                                                        translated_proper_name = clean_proper_name
+                                            else:
+                                                # For non-Arabic targets, keep original proper names
                                                 translated_proper_name = proper_name
                                         else:
                                             translated_proper_name = None

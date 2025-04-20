@@ -4840,15 +4840,18 @@ async def get_recommendations(
                 all_recommendations = translated_recommendations
                 logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
         
-        # Simplify place objects in recommendations
+# Simplify place objects in recommendations
         simplified_recommendations = []
         for place in all_recommendations:
-             average_rating = place.get("average_rating")
+            # Extract and clean average_rating
+            average_rating = place.get("average_rating")
+            # Handle MongoDB formatted number
             if isinstance(average_rating, dict) and "$numberDouble" in average_rating:
-                  try:
-                       average_rating = float(average_rating.get("$numberDouble"))
-                  except (ValueError, TypeError):
-                      average_rating = None
+                try:
+                    average_rating = float(average_rating.get("$numberDouble"))
+                except (ValueError, TypeError):
+                    average_rating = None
+                
             simplified_place = {
                 "name": place.get("name"),
                 "category": place.get("category"),
@@ -4859,7 +4862,7 @@ async def get_recommendations(
                     "country": place.get("location", {}).get("country")
                 },
                 "accessibility": place.get("accessibility", []),
-                "average_rating": place.get("average_rating"),
+                "average_rating": average_rating,  # Use the cleaned value
                 "likes": place.get("likes"),
                 "reviews_count": place.get("reviews_count"),
                 "appropriate_time": place.get("appropriate_time", []),

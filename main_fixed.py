@@ -4949,9 +4949,6 @@ async def get_roadmap(user_id: str, language: str = None):
             simplified_list = translate_roadmap_results(simplified_list, language)
         
         return {
-            "success": True, 
-            "user_id": user_id, 
-            "count": len(simplified_list),
             "data": simplified_list
             # Entire metadata section removed
         }

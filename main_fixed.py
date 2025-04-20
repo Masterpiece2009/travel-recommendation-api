@@ -4542,6 +4542,26 @@ async def get_recommendations(
                 
                 # Dictionary of landmark types in different languages
                 landmark_types = {
+                    # Added English landmark types
+                    "en": {
+                        "Castle": "castle",
+                        "Palace": "palace",
+                        "Cathedral": "cathedral",
+                        "Museum": "museum",
+                        "Basilica": "basilica",
+                        "Church": "church",
+                        "Tower": "tower",
+                        "Bridge": "bridge",
+                        "Fort": "fort",
+                        "Abbey": "abbey",
+                        "Temple": "temple",
+                        "Monument": "monument",
+                        "Mosque": "mosque",
+                        "Shrine": "shrine",
+                        "Park": "park",
+                        "Square": "square",
+                        "Statue": "statue"
+                    },
                     "fr": {
                         "Château": "castle/palace",
                         "Palais": "palace",
@@ -4597,7 +4617,8 @@ async def get_recommendations(
                             # Identify if this is a landmark and get its type
                             if name_language in landmark_types:
                                 for landmark in landmark_types[name_language]:
-                                    if name.startswith(landmark):
+                                    # Check for exact landmark or landmark followed by space
+                                    if name == landmark or name.startswith(landmark + " "):
                                         is_landmark = True
                                         english_landmark_type = landmark_types[name_language][landmark]
                                         
@@ -4615,6 +4636,8 @@ async def get_recommendations(
                                             proper_name = proper_name[3:].strip()
                                         elif name_language == "de" and proper_name.startswith("von "):
                                             proper_name = proper_name[4:].strip()
+                                        elif name_language == "en" and proper_name.startswith("of "):
+                                            proper_name = proper_name[3:].strip()
                                         
                                         break
                             

@@ -4793,35 +4793,81 @@ async def search_places(
         # Extract just the place data
         places_only = [item["place"] for item in sorted_results]
         
+        # --- START OF SECTION TO MODIFY ---
         # Translate results back to original language if requested
         if translate_results and detected_language not in ['en', 'und'] and len(places_only) > 0:
             translated_places = []
             
+            # Add this import if it's not already at the top of your file
+            import copy
+            
             for place in places_only:
-                # Create a copy of the place to modify
-                translated_place = dict(place)
+                # Replace this line:
+                # translated_place = dict(place)
+                # With this line:
+                translated_place = copy.deepcopy(place)
                 
-                # Translate key fields
-                if "name" in place:
-                    translated_place["name"] = translate_from_english(place["name"], detected_language)
-                    
-                if "description" in place:
-                    translated_place["description"] = translate_from_english(place["description"], detected_language)
-                    
-                if "category" in place:
-                    translated_place["category"] = translate_from_english(place["category"], detected_language)
-                    
-                # Translate tags if present
-                if "tags" in place and isinstance(place["tags"], list):
-                    translated_place["tags"] = [
-                        translate_from_english(tag, detected_language) 
-                        for tag in place["tags"]
-                    ]
+                # Replace these translation blocks:
+                
+                # Old code:
+                # if "name" in place:
+                #     translated_place["name"] = translate_from_english(place["name"], detected_language)
+                
+                # New code with type checking:
+                if "name" in translated_place and isinstance(translated_place["name"], str):
+                    translated_place["name"] = translate_from_english(translated_place["name"], detected_language)
+                
+                # Old code:
+                # if "description" in place:
+                #     translated_place["description"] = translate_from_english(place["description"], detected_language)
+                
+                # New code with type checking:
+                if "description" in translated_place and isinstance(translated_place["description"], str):
+                    translated_place["description"] = translate_from_english(translated_place["description"], detected_language)
+                
+                # Old code:
+                # if "category" in place:
+                #     translated_place["category"] = translate_from_english(place["category"], detected_language)
+                
+                # New code with type checking:
+                if "category" in translated_place and isinstance(translated_place["category"], str):
+                    translated_place["category"] = translate_from_english(translated_place["category"], detected_language)
+                
+                # Replace tag translation:
+                # Old code:
+                # if "tags" in place and isinstance(place["tags"], list):
+                #     translated_place["tags"] = [
+                #         translate_from_english(tag, detected_language) 
+                #         for tag in place["tags"]
+                #     ]
+                
+                # New code with type checking for each tag:
+                if "tags" in translated_place and isinstance(translated_place["tags"], list):
+                    translated_tags = []
+                    for tag in translated_place["tags"]:
+                        if isinstance(tag, str):
+                            translated_tag = translate_from_english(tag, detected_language)
+                            translated_tags.append(translated_tag)
+                        else:
+                            translated_tags.append(tag)
+                    translated_place["tags"] = translated_tags
+                
+                # Add this new code for location translation:
+                if "location" in translated_place and isinstance(translated_place["location"], dict):
+                    if "city" in translated_place["location"] and isinstance(translated_place["location"]["city"], str):
+                        translated_place["location"]["city"] = translate_from_english(
+                            translated_place["location"]["city"], detected_language
+                        )
+                    if "country" in translated_place["location"] and isinstance(translated_place["location"]["country"], str):
+                        translated_place["location"]["country"] = translate_from_english(
+                            translated_place["location"]["country"], detected_language
+                        )
                 
                 translated_places.append(translated_place)
                 
             places_only = translated_places
             logger.info(f"Translated {len(places_only)} results to {detected_language}")
+        # --- END OF SECTION TO MODIFY ---
         
         # Simplify the place objects in the final results
         simplified_results = []

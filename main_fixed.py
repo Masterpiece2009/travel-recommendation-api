@@ -2412,12 +2412,13 @@ def calculate_personalization_score(place, user_id, user_prefs):
     Calculate personalization score for a place based on user preferences.
     
     Scoring components:
-    - Category match (40%): Direct match (1.0) or partial/substring match (0.7)
-    - Tag match (30%): Proportional to number of matching tags
-    - Rating factor (20%): Normalized place rating (0-5 scale)
+    - Category match (35%): Direct match (1.0) or partial/substring match (0.7)
+    - Tag match (25%): Proportional to number of matching tags
+    - Rating factor (15%): Normalized place rating (0-5 scale)
     - User interaction history (10%): Based on previous positive interactions or dislikes
+    - Review factors (15%): Based on review sentiment, likes, and count
     
-    The final score is weighted: (category*0.4 + tags*0.3 + rating*0.2 + interactions*0.1)
+    The final score is weighted: (category*0.35 + tags*0.25 + rating*0.15 + interactions*0.1 + reviews*0.15)
     
     Args:
         place: Place document
@@ -2427,6 +2428,9 @@ def calculate_personalization_score(place, user_id, user_prefs):
     Returns:
         Personalization score between 0 and 1
     """
+    import re
+    import math
+    
     # Helper function to safely extract numeric values from MongoDB data
     def extract_numeric(value, default=0):
         if isinstance(value, dict):
@@ -2450,7 +2454,7 @@ def calculate_personalization_score(place, user_id, user_prefs):
             return default
 
     try:
-        # 1. Category matching (40% of score)
+        # 1. Category matching (35% of score) - reduced from 40%
         category_score = 0
         place_category = place.get("category", "").lower()
         preferred_categories = [cat.lower() for cat in user_prefs.get("preferred_categories", [])]
@@ -2469,7 +2473,7 @@ def calculate_personalization_score(place, user_id, user_prefs):
             # No preferred categories, neutral score
             category_score = 0.5
             
-        # 2. Tag matching (30% of score)
+        # 2. Tag matching (25% of score) - reduced from 30%
         tag_score = 0
         place_tags = [tag.lower() for tag in place.get("tags", [])]
         preferred_tags = [tag.lower() for tag in user_prefs.get("preferred_tags", [])]
@@ -2481,7 +2485,7 @@ def calculate_personalization_score(place, user_id, user_prefs):
             # No tags to compare, neutral score
             tag_score = 0.5
             
-        # 3. Rating factor (20% of score) - FIXED to handle MongoDB type
+        # 3. Rating factor (15% of score) - reduced from 20%
         raw_rating = place.get("rating", 0)
         rating_value = extract_numeric(raw_rating, 0)  # Extract numeric value safely
         rating_score = min(rating_value / 5.0, 1.0)  # Normalize to 0-1
@@ -2508,12 +2512,102 @@ def calculate_personalization_score(place, user_id, user_prefs):
             elif past_interactions.get("disliked", False):
                 interaction_score = 0.1
         
-        # Calculate final weighted score
+        # 5. Review factors (15% of score) - NEW component
+        review_score = 0.5  # Default neutral score
+        
+        # Look up reviews for this place
+        place_reviews = list(reviews_collection.find({"place_id": place.get("_id", "")}))
+        
+        if place_reviews:
+            # 5.1 Social proof from likes
+            total_likes = 0
+            for review in place_reviews:
+                # Extract likes using existing extract_numeric helper
+                likes_count = extract_numeric(review.get("likes", 0))
+                total_likes += likes_count
+            
+            # Scale likes with logarithmic function to prevent extremes
+            # 0 likes = 0.5, 10 likes = 0.75, 100 likes = 0.9, 1000 likes = 1.0
+            likes_factor = 0.5 + min(math.log10(1 + total_likes) / 2.0, 0.5)
+            
+            # 5.2 Pattern-based sentiment analysis
+            # Define positive and negative word lists
+            positive_words = ["amazing", "excellent", "great", "good", "wonderful", "awesome", 
+                              "beautiful", "enjoyed", "recommend", "fantastic", "love", "best",
+                              "perfect", "impressive", "breathtaking", "stunning"]
+            negative_words = ["disappointing", "terrible", "bad", "worst", "avoid", "horrible", 
+                              "poor", "waste", "unfortunate", "awful", "mediocre", "not worth",
+                              "overpriced", "dirty", "crowded", "rude"]
+            
+            # Create patterns with word boundaries
+            positive_patterns = [r'\b' + word + r'\b' for word in positive_words]
+            negative_patterns = [r'\b' + word + r'\b' for word in negative_words]
+            
+            # Add negative context patterns
+            negative_contexts = [
+                r'not\s+\w*\s*(?:good|great|nice)', 
+                r'too\s+(?:expensive|crowded|busy)',
+                r'(?:never|wouldn\'t)\s+(?:recommend|return)'
+            ]
+            
+            sentiment_sum = 0
+            reviews_with_text = 0
+            
+            for review in place_reviews:
+                if review.get("review_text"):
+                    reviews_with_text += 1
+                    text = review.get("review_text", "").lower()
+                    
+                    # Count positive patterns
+                    pos_count = 0
+                    for pattern in positive_patterns:
+                        matches = re.findall(pattern, text)
+                        pos_count += len(matches)
+                    
+                    # Count negative patterns
+                    neg_count = 0
+                    for pattern in negative_patterns:
+                        matches = re.findall(pattern, text)
+                        neg_count += len(matches)
+                    
+                    # Add negative context matches
+                    for pattern in negative_contexts:
+                        matches = re.findall(pattern, text)
+                        neg_count += len(matches)
+                    
+                    # Add weighting for review length
+                    length_factor = min(len(text.split()) / 50, 1.0)  # Cap at reviews of 50+ words
+                    
+                    # Calculate final sentiment for this review
+                    if pos_count + neg_count > 0:
+                        # Calculate base sentiment (-1 to +1 scale)
+                        base_sentiment = (pos_count - neg_count) / (pos_count + neg_count)
+                        # Weight longer reviews more heavily
+                        weighted_sentiment = base_sentiment * (0.7 + (length_factor * 0.3))
+                        # Normalize to 0-1 scale
+                        normalized_sentiment = (weighted_sentiment + 1) / 2
+                        sentiment_sum += normalized_sentiment
+                    else:
+                        # No sentiment detected, use neutral score slightly weighted by length
+                        sentiment_sum += 0.5 * (1 + (length_factor * 0.1))
+            
+            # Calculate average sentiment
+            sentiment_score = sentiment_sum / reviews_with_text if reviews_with_text > 0 else 0.5
+            
+            # 5.3 Review count as a reliability measure
+            # 0 reviews = 0.5, 5 reviews = 0.7, 10+ reviews = 0.9
+            count_factor = 0.5 + min(len(place_reviews) / 20.0, 0.4)
+            
+            # Combine all review factors
+            review_score = (likes_factor * 0.4) + (sentiment_score * 0.4) + (count_factor * 0.2)
+        
+        # Calculate final weighted score with review component
         final_score = (
-            (category_score * 0.4) +
-            (tag_score * 0.3) +
-            (rating_score * 0.2) +
-            (interaction_score * 0.1)
+            (category_score * 0.35) +   # Reduced from 0.4
+            (tag_score * 0.25) +        # Reduced from 0.3
+            (rating_score * 0.15) +     # Reduced from 0.2
+            (interaction_score * 0.1) + # Unchanged
+            (review_score * 0.15)       # New component
         )
         
         return final_score

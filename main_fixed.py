@@ -2414,8 +2414,8 @@ def calculate_personalization_score(place, user_id, user_prefs):
     Scoring components:
     - Category match (35%): Direct match (1.0) or partial/substring match (0.7)
     - Tag match (25%): Proportional to number of matching tags
-    - Rating factor (15%): Normalized place rating (0-5 scale)
-    - User interaction history (10%): Based on previous positive interactions or dislikes
+    - Rating factor (15%): Normalized place average_rating (0-5 scale)
+    - User interaction history (10%): Based on interaction_type (like, save, share, view)
     - Review factors (15%): Based on review sentiment, likes/dislikes, and count
     
     The final score is weighted: (category*0.35 + tags*0.25 + rating*0.15 + interactions*0.1 + reviews*0.15)
@@ -2486,31 +2486,46 @@ def calculate_personalization_score(place, user_id, user_prefs):
             tag_score = 0.5
             
         # 3. Rating factor (15% of score) - reduced from 20%
-        raw_rating = place.get("rating", 0)
+        # FIXED: Changed from rating to average_rating
+        raw_rating = place.get("average_rating", 0)
         rating_value = extract_numeric(raw_rating, 0)  # Extract numeric value safely
         rating_score = min(rating_value / 5.0, 1.0)  # Normalize to 0-1
             
         # 4. User interaction history (10% of score)
         interaction_score = 0.5  # Default neutral score
         
-        # Look up past interactions
-        past_interactions = interactions_collection.find_one({
+        # Look up past interactions from interactions collection
+        user_interactions = list(interactions_collection.find({
             "user_id": user_id,
-            "place_id": place["_id"]
-        })
+            "place_id": place.get("_id", "")
+        }))
         
-        if past_interactions:
-            # Positive interactions increase score
-            if past_interactions.get("liked", False):
-                interaction_score = 0.9
-            elif past_interactions.get("saved", False):
-                interaction_score = 0.8
-            # Handle viewed count which might be a MongoDB type
-            elif extract_numeric(past_interactions.get("viewed", 0)) > 3:
-                interaction_score = 0.7
-            # Negative interactions decrease score
-            elif past_interactions.get("disliked", False):
-                interaction_score = 0.1
+        # Process all interactions for this user and place
+        if user_interactions:
+            # Track interaction types and view count
+            interaction_types = set()
+            view_count = 0
+            
+            for interaction in user_interactions:
+                interaction_type = interaction.get("interaction_type", "")
+                if interaction_type == "like":
+                    interaction_types.add("like")
+                elif interaction_type == "save":
+                    interaction_types.add("save")
+                elif interaction_type == "share":
+                    interaction_types.add("share") 
+                elif interaction_type == "view":
+                    view_count += 1
+            
+            # Assign score based on interaction types (prioritized)
+            if "like" in interaction_types:
+                interaction_score = 0.9  # Highest score for likes
+            elif "save" in interaction_types:
+                interaction_score = 0.8  # High score for saves
+            elif "share" in interaction_types:
+                interaction_score = 0.7  # Good score for shares
+            elif view_count > 3:
+                interaction_score = 0.6  # Moderate score for multiple views
         
         # 5. Review factors (15% of score) - NEW component
         review_score = 0.5  # Default neutral score
@@ -2545,23 +2560,94 @@ def calculate_personalization_score(place, user_id, user_prefs):
             social_proof_factor = likes_factor + volume_boost
             
             # 5.2 Pattern-based sentiment analysis
-            # Define positive and negative word lists
-            positive_words = ["amazing", "excellent", "great", "good", "wonderful", "awesome", 
-                              "beautiful", "enjoyed", "recommend", "fantastic", "love", "best",
-                              "perfect", "impressive", "breathtaking", "stunning"]
-            negative_words = ["disappointing", "terrible", "bad", "worst", "avoid", "horrible", 
-                              "poor", "waste", "unfortunate", "awful", "mediocre", "not worth",
-                              "overpriced", "dirty", "crowded", "rude"]
+            # Define positive and negative word lists - EXPANDED
+            positive_words = [
+                # Original words
+                "amazing", "excellent", "great", "good", "wonderful", "awesome", 
+                "beautiful", "enjoyed", "recommend", "fantastic", "love", "best",
+                "perfect", "impressive", "breathtaking", "stunning",
+                
+                # Additional travel-specific positive words
+                "authentic", "scenic", "convenient", "spacious", "delicious",
+                "friendly", "helpful", "clean", "comfortable", "peaceful",
+                "relaxing", "paradise", "unforgettable", "magical", "charming",
+                "luxurious", "tranquil", "picturesque", "idyllic", "spectacular",
+                "worth", "gem", "hidden", "treasure", "affordable", "value",
+                "welcoming", "cozy", "unique", "convenient", "safe", "accessible",
+                "fascinating", "interesting", "informative", "entertaining",
+                "immersive", "refreshing", "rejuvenating", "serene", "pleasant",
+                "memorable", "enchanting", "lovely", "delightful", "superb",
+                "exceptional", "outstanding", "terrific", "marvelous", "fabulous",
+                "paradise", "heaven", "ideal", "perfect", "dream", "romantic",
+                "exotic", "sophisticated", "elegant", "stylish", "modern",
+                "authentic", "genuine", "traditional", "cultural", "historical",
+                "satisfied", "satisfying", "enjoyable", "fun", "exciting",
+                "therapeutic", "professional", "courteous", "attentive", "organized",
+                "efficient", "quick", "prompt", "convenient", "central",
+                "incredible", "generous", "reasonable", "affordable", "bargain",
+                "gorgeous", "majestic", "unbelievable", "astonishing", "awe-inspiring"
+            ]
+            
+            negative_words = [
+                # Original words
+                "disappointing", "terrible", "bad", "worst", "avoid", "horrible", 
+                "poor", "waste", "unfortunate", "awful", "mediocre", "not worth",
+                "overpriced", "dirty", "crowded", "rude",
+                
+                # Additional travel-specific negative words
+                "overrated", "uncomfortable", "boring", "unsafe", "dangerous",
+                "expensive", "noisy", "unreliable", "inconvenient", "cramped",
+                "smelly", "sketchy", "rundown", "outdated", "neglected",
+                "unpleasant", "disappointing", "lackluster", "touristy", "scam",
+                "ripoff", "tourist-trap", "underwhelming", "unhelpful", "unfriendly",
+                "slow", "inefficient", "frustrating", "disorganized", "chaotic",
+                "bland", "tasteless", "greasy", "cold", "stale", "unsanitary",
+                "unhygienic", "questionable", "suspicious", "misleading", "dishonest",
+                "unprofessional", "amateurish", "sloppy", "careless", "neglectful",
+                "indifferent", "apathetic", "uninterested", "unresponsive", "remote",
+                "isolated", "inaccessible", "difficult", "complicated", "confusing",
+                "unimpressive", "ordinary", "forgettable", "unremarkable", "generic",
+                "tacky", "cheesy", "kitschy", "gimmicky", "artificial", "fake",
+                "appalling", "dreadful", "filthy", "disgusting", "unacceptable",
+                "pathetic", "ridiculous", "absurd", "terrible", "atrocious",
+                "miserable", "regret", "regrettable", "annoying", "irritating",
+                "infuriating", "outrageous", "disgraceful", "shameful", "abysmal",
+                "disastrous", "nightmarish", "horrific", "creepy", "scary",
+                "distressing", "unsettling", "worrying", "concerning", "problematic"
+            ]
             
             # Create patterns with word boundaries
             positive_patterns = [r'\b' + word + r'\b' for word in positive_words]
             negative_patterns = [r'\b' + word + r'\b' for word in negative_words]
             
-            # Add negative context patterns
+            # Add negative context patterns - EXPANDED
             negative_contexts = [
+                # Original patterns
                 r'not\s+\w*\s*(?:good|great|nice)', 
                 r'too\s+(?:expensive|crowded|busy)',
-                r'(?:never|wouldn\'t)\s+(?:recommend|return)'
+                r'(?:never|wouldn\'t)\s+(?:recommend|return)',
+                
+                # Additional patterns
+                r'far\s+from\s+(?:everything|anything)',
+                r'nothing\s+(?:special|interesting|unique)',
+                r'lack\s+of\s+(?:cleanliness|service|amenities|facilities)',
+                r'didn\'t\s+(?:enjoy|like|appreciate)',
+                r'waste\s+of\s+(?:money|time)',
+                r'could\s+(?:be|have been)\s+better',
+                r'not\s+(?:worth|clean|friendly|helpful)',
+                r'(?:barely|hardly)\s+(?:edible|acceptable|adequate)',
+                r'(?:completely|totally)\s+(?:disappointed|let down)',
+                r'bad\s+(?:experience|service|food|accommodation)',
+                r'hard\s+to\s+(?:find|access|reach)',
+                r'no\s+(?:charm|character|atmosphere)',
+                r'better\s+(?:places|options|alternatives)\s+(?:nearby|elsewhere|available)',
+                r'avoid\s+(?:this|at all costs)',
+                r'expected\s+(?:more|better)',
+                r'not\s+as\s+(?:good|nice|clean|friendly)\s+as',
+                r'wouldn\'t\s+(?:stay|visit|eat)\s+(?:here|there|again)',
+                r'(?:should|needs to)\s+(?:improve|change|update)',
+                r'(?:way|far)\s+(?:too|below)\s+(?:expensive|pricey|overpriced)',
+                r'(?:false|misleading)\s+(?:advertising|description|photos)'
             ]
             
             sentiment_sum = 0

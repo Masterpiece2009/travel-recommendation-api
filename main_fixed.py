@@ -811,7 +811,7 @@ try:
     # Create new index on last_updated field
     shown_places_collection.create_index(
         [("last_updated", pymongo.ASCENDING)],  # Changed from "timestamp" to "last_updated"
-        expireAfterSeconds=60  # 6 hours
+        expireAfterSeconds=21600  # 6 hours
     )
     logger.info("✅ Created TTL index on shown_places collection using last_updated field")
 except Exception as e:

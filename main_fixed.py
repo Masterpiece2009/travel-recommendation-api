@@ -2011,14 +2011,7 @@ def get_collaborative_recommendations(user_id, target_count=39, excluded_place_i
             "like": 5,
             "save": 4,
             "share": 3,
-            "comment": 3,
             "view": 2,
-            "click": 1,
-            "dislike": -5,
-            "viewed": 2,
-            "liked": 5,
-            "visited": 4,
-            "reviewed": 3
         }
 
         # Get current time consistently - ensure it's timezone-naive

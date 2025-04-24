@@ -767,6 +767,8 @@ keyword_similarity_cache = db["keyword_similarity_cache"]
 similar_users_cache = db["similar_users_cache"]
 # Add translation cache collection
 translation_cache = db["translation_cache"]
+# Add reviews collection
+reviews_collection = db["reviews"]  # New collection for place reviews
 
 # Later, add this with your other TTL indexes
 try:

@@ -2433,26 +2433,37 @@ def calculate_personalization_score(place, user_id, user_prefs):
     
     # Helper function to safely extract numeric values from MongoDB data
     def extract_numeric(value, default=0):
-        if isinstance(value, dict):
-            # Handle MongoDB numeric types
-            if "$numberDouble" in value:
-                return float(value["$numberDouble"])
-            if "$numberInt" in value:
-                return float(int(value["$numberInt"]))
-            if "$numberLong" in value:
-                return float(int(value["$numberLong"]))
-            # Skip MongoDB date objects
-            if "$date" in value:
-                return default
-            return default
-        
-        # Handle direct numeric types
-        if isinstance(value, (int, float)):
-            return float(value)
-        
-        # Try converting string to float
         try:
-            return float(value)
+            if isinstance(value, dict):
+                # Handle MongoDB numeric types
+                if "$numberDouble" in value:
+                    val = float(value["$numberDouble"])
+                    # Check for invalid JSON values
+                    if math.isnan(val) or math.isinf(val):
+                        return default
+                    return val
+                if "$numberInt" in value:
+                    return float(int(value["$numberInt"]))
+                if "$numberLong" in value:
+                    return float(int(value["$numberLong"]))
+                # Skip MongoDB date objects
+                if "$date" in value:
+                    return default
+                return default
+            
+            # Handle direct numeric types
+            if isinstance(value, (int, float)):
+                # Check for invalid JSON values
+                if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                    return default
+                return float(value)
+            
+            # Try converting string to float
+            val = float(value)
+            # Check for invalid JSON values
+            if math.isnan(val) or math.isinf(val):
+                return default
+            return val
         except (TypeError, ValueError):
             return default
 

@@ -2441,6 +2441,9 @@ def calculate_personalization_score(place, user_id, user_prefs):
                 return float(int(value["$numberInt"]))
             if "$numberLong" in value:
                 return float(int(value["$numberLong"]))
+            # Skip MongoDB date objects
+            if "$date" in value:
+                return default
             return default
         
         # Handle direct numeric types

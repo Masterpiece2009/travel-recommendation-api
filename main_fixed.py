@@ -811,7 +811,7 @@ except Exception as e:
 try:
     shown_places_collection.create_index(
         [("timestamp", pymongo.ASCENDING)],
-        expireAfterSeconds=21600  # 6 hours
+        expireAfterSeconds=100  # 6 hours
     )
     logger.info("✅ Created TTL index on shown_places collection")
 except Exception as e:

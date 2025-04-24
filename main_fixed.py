@@ -807,13 +807,13 @@ try:
 except Exception as e:
     logger.error(f"❌ Error creating TTL index on recommendations_cache collection: {e}")
 
-# TTL index for shown places (expires after 6 hours)
 try:
+    # Create new index on last_updated field
     shown_places_collection.create_index(
-        [("timestamp", pymongo.ASCENDING)],
-        expireAfterSeconds=100  # 6 hours
+        [("last_updated", pymongo.ASCENDING)],  # Changed from "timestamp" to "last_updated"
+        expireAfterSeconds=60  # 6 hours
     )
-    logger.info("✅ Created TTL index on shown_places collection")
+    logger.info("✅ Created TTL index on shown_places collection using last_updated field")
 except Exception as e:
     logger.error(f"❌ Error creating TTL index on shown_places collection: {e}")
 

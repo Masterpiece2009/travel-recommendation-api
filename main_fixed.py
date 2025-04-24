@@ -2416,7 +2416,7 @@ def calculate_personalization_score(place, user_id, user_prefs):
     - Tag match (25%): Proportional to number of matching tags
     - Rating factor (15%): Normalized place rating (0-5 scale)
     - User interaction history (10%): Based on previous positive interactions or dislikes
-    - Review factors (15%): Based on review sentiment, likes, and count
+    - Review factors (15%): Based on review sentiment, likes/dislikes, and count
     
     The final score is weighted: (category*0.35 + tags*0.25 + rating*0.15 + interactions*0.1 + reviews*0.15)
     
@@ -2519,16 +2519,30 @@ def calculate_personalization_score(place, user_id, user_prefs):
         place_reviews = list(reviews_collection.find({"place_id": place.get("_id", "")}))
         
         if place_reviews:
-            # 5.1 Social proof from likes
+            # 5.1 Social proof from likes and dislikes (enhanced)
             total_likes = 0
+            total_dislikes = 0
             for review in place_reviews:
-                # Extract likes using existing extract_numeric helper
+                # Extract likes and dislikes using existing extract_numeric helper
                 likes_count = extract_numeric(review.get("likes", 0))
+                dislikes_count = extract_numeric(review.get("dislikes", 0))
                 total_likes += likes_count
+                total_dislikes += dislikes_count
             
-            # Scale likes with logarithmic function to prevent extremes
-            # 0 likes = 0.5, 10 likes = 0.75, 100 likes = 0.9, 1000 likes = 1.0
-            likes_factor = 0.5 + min(math.log10(1 + total_likes) / 2.0, 0.5)
+            # Calculate social proof ratio (with protection against division by zero)
+            total_interactions = total_likes + total_dislikes
+            if total_interactions > 0:
+                likes_ratio = total_likes / total_interactions
+                # Scale the ratio: 0% positive = 0.1, 50% positive = 0.5, 100% positive = 0.9
+                likes_factor = 0.1 + (likes_ratio * 0.8)
+            else:
+                # No likes or dislikes, use neutral score
+                likes_factor = 0.5
+            
+            # Add volume factor to give more weight to places with more engagement
+            # More engagement (whether positive or negative) = more reliable signal
+            volume_boost = min(math.log10(1 + total_interactions) / 10.0, 0.1)
+            social_proof_factor = likes_factor + volume_boost
             
             # 5.2 Pattern-based sentiment analysis
             # Define positive and negative word lists
@@ -2598,8 +2612,9 @@ def calculate_personalization_score(place, user_id, user_prefs):
             # 0 reviews = 0.5, 5 reviews = 0.7, 10+ reviews = 0.9
             count_factor = 0.5 + min(len(place_reviews) / 20.0, 0.4)
             
-            # Combine all review factors
-            review_score = (likes_factor * 0.4) + (sentiment_score * 0.4) + (count_factor * 0.2)
+            # Combine all review factors (updated weights)
+            # Give more weight to social proof factor (incorporating likes/dislikes)
+            review_score = (social_proof_factor * 0.45) + (sentiment_score * 0.35) + (count_factor * 0.2)
         
         # Calculate final weighted score with review component
         final_score = (

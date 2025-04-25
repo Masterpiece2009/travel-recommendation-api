@@ -4501,7 +4501,7 @@ def simplify_roadmap_to_list(roadmap_data):
         roadmap_data: Original roadmap data
         
     Returns:
-        List of places with route information and warnings
+        List of places with route information and warnings or positive message
     """
     if not roadmap_data or "places" not in roadmap_data:
         return []
@@ -4519,8 +4519,11 @@ def simplify_roadmap_to_list(roadmap_data):
     # Create the simplified list
     simplified = []
     
-    # Add warnings as special entries at the beginning if they exist
-    if "warnings" in roadmap_data and roadmap_data["warnings"]:
+    # Check if there are warnings
+    has_warnings = "warnings" in roadmap_data and roadmap_data["warnings"] and len(roadmap_data["warnings"]) > 0
+    
+    if has_warnings:
+        # Add existing warnings
         for warning in roadmap_data["warnings"]:
             warning_entry = {
                 "type": "warning",
@@ -4529,6 +4532,15 @@ def simplify_roadmap_to_list(roadmap_data):
                 "is_warning": True
             }
             simplified.append(warning_entry)
+    else:
+        # Add a positive message when there are no warnings
+        positive_entry = {
+            "type": "message",
+            "message_type": "success",
+            "message": "This roadmap matches your preferences perfectly!",
+            "is_warning": False
+        }
+        simplified.append(positive_entry)
     
     # Then add the place entries
     for place in places:

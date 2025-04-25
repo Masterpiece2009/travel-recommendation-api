@@ -5073,7 +5073,7 @@ async def get_recommendations(
                 all_recommendations = translated_recommendations
                 logger.info(f"Translated {len(all_recommendations)} recommendations to {target_language}")
         
-# Simplify place objects in recommendations
+        # Simplify place objects in recommendations
         simplified_recommendations = []
         for place in all_recommendations:
             # Extract and clean average_rating
@@ -5104,51 +5104,45 @@ async def get_recommendations(
             }
             simplified_recommendations.append(simplified_place)
         
-        # Return only the simplified recommendations array
-        return simplified_recommendations
+        # Create a structured response similar to roadmap format
+        structured_response = {
+            "data": []
+        }
+        
+        # If no recommendations found, add a message
+        if not simplified_recommendations:
+            structured_response["data"] = [{
+                "type": "message",
+                "message_type": "no_results",
+                "message": "No recommendations found based on your preferences. Try exploring different categories.",
+                "is_warning": True
+            }]
+        else:
+            # If we have recommendations, add a success message
+            success_message = {
+                "type": "message",
+                "message_type": "success",
+                "message": f"Found {len(simplified_recommendations)} recommendations for you.",
+                "is_warning": False
+            }
+            
+            # Add the message as first item in the data array
+            structured_response["data"].append(success_message)
+            
+            # Add each place to the data array
+            for place in simplified_recommendations:
+                structured_response["data"].append({
+                    "place": place
+                })
+        
+        # Return the structured response
+        return structured_response
         
     except Exception as e:
         logger.error(f"Error generating recommendations: {str(e)}")
         return JSONResponse(
             status_code=500,
             content={"error": str(e)}
-        )
-@app.post("/recommendations")
-async def create_recommendations(request: RecommendationRequest, background_tasks: BackgroundTasks):
-    """Generate recommendations for a user (force refresh)"""
-    try:
-        user_id = request.user_id
-        num_recommendations = request.num_recommendations
-        
-        # Generate fresh recommendations
-        recommendations = generate_final_recommendations(user_id, num_recommendations)
-        
-        # Clear existing cache for this user
-        recommendations_cache_collection.delete_many({"user_id": user_id})
-        
-        # Store as sequence 0 (new generation)
-        recommendations_cache_collection.insert_one({
-            "user_id": user_id,
-            "sequence": 0,
-            "recommendations": recommendations,
-            "timestamp": datetime.now()
-        })
-        
-        # Schedule cache generation for future requests
-        background_tasks.add_task(background_cache_recommendations, user_id, 6)
-        
-        return {
-            "success": True,
-            "user_id": user_id,
-            "count": len(recommendations),
-            "recommendations": recommendations
-        }
-        
-    except Exception as e:
-        logger.error(f"Error generating recommendations: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "error": str(e)}
         )
 @app.post("/cache/generate/{user_id}")
 async def force_cache_generation(

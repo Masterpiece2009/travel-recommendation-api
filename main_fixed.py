@@ -44,6 +44,16 @@ def is_likely_english(text):
     if not re.match(r'^[a-zA-Z\s\'\-,.!?0-9]+$', normalized):
         return False
         
+    # Travel-specific vocabulary often misdetected in short queries
+    travel_specific_words = {"sun", "sea", "sky", "bay", "sand", "view", "pool", "golf", "spa", "tour",
+        "surf", "dive", "hike", "bike", "food", "wine", "beer", "dine", "shop", "art",
+        "cafe", "lake", "peak", "hill", "path", "park", "camp", "fish", "boat", "sail",
+        "walk", "trek", "swim", "reef", "cave", "rock", "snow", "ride", "trip", "rest",
+        "site", "town", "city", "farm", "fort", "port", "dock", "ship", "star", "hot",
+        "cold", "warm", "cool", "fair", "show", "play", "game", "room", "stay", "bed",
+        "meal", "plan", "cost", "time", "date", "week", "day", "fun", "joy", "rest",
+        "beach", "shore", "coast", "ocean", "island", "river", "bridge", "road", "trail"}
+        
     # For very short texts (1-3 words), check against common English words
     if len(normalized.split()) <= 3:
         # This list contains very common English words that might appear in short phrases
@@ -63,10 +73,15 @@ def is_likely_english(text):
         for word in words:
             # Remove punctuation for comparison
             clean_word = word.strip(".,!?;:'\"")
-            if clean_word in very_common_words:
+            if clean_word in very_common_words or clean_word in travel_specific_words:
+                return True
+            
+            # For single words that are very short (≤4 letters), assume English to avoid misdetection
+            if len(words) == 1 and len(clean_word) <= 4:
                 return True
     
     return False
+
 def detect_language(text):
     """
     Detect the language of a text string with improved detection for common words.
@@ -147,7 +162,9 @@ def detect_language(text):
             "tourist", "guide", "tour", "visit", "passport", "visa", "luggage",
             "suitcase", "backpack", "map", "location", "address", "restaurant",
             "cafe", "museum", "park", "garden", "castle", "palace", "monument",
-            "souvenir", "photo", "picture", "camera", "sunset", "sunrise"
+            "souvenir", "photo", "picture", "camera", "sunset", "sunrise",
+            # Add problem words explicitly
+            "sun", "shore", "sea", "ocean", "river", "lake", "island", "coast"
         }
         
         # Check if the text is a common English word

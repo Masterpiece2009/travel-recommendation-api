@@ -5109,31 +5109,11 @@ async def get_recommendations(
             "data": []
         }
         
-        # If no recommendations found, add a message
-        if not simplified_recommendations:
-            structured_response["data"] = [{
-                "type": "message",
-                "message_type": "no_results",
-                "message": "No recommendations found based on your preferences. Try exploring different categories.",
-                "is_warning": True
-            }]
-        else:
-            # If we have recommendations, add a success message
-            success_message = {
-                "type": "message",
-                "message_type": "success",
-                "message": f"Found {len(simplified_recommendations)} recommendations for you.",
-                "is_warning": False
-            }
-            
-            # Add the message as first item in the data array
-            structured_response["data"].append(success_message)
-            
-            # Add each place to the data array
-            for place in simplified_recommendations:
-                structured_response["data"].append({
-                    "place": place
-                })
+        # Add each place to the data array, without any message
+        for place in simplified_recommendations:
+            structured_response["data"].append({
+                "place": place
+            })
         
         # Return the structured response
         return structured_response

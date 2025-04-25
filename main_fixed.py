@@ -5643,8 +5643,39 @@ async def search_places(
             }
             simplified_results.append(simplified_place)
         
-        # Return just the simplified array of places
-        return simplified_results
+        # Create a structured response with the same format as roadmap
+        structured_response = {
+            "data": []
+        }
+        
+        # If no results found, add a message
+        if not simplified_results:
+            structured_response["data"] = [{
+                "type": "message",
+                "message_type": "no_results",
+                "message": f"No places found matching '{original_query}'. Try a different search term.",
+                "is_warning": True
+            }]
+        else:
+            # If we have results, add a success message
+            success_message = {
+                "type": "message",
+                "message_type": "success",
+                "message": f"Found {len(simplified_results)} places matching your search.",
+                "is_warning": False
+            }
+            
+            # Add the message as first item in the data array
+            structured_response["data"].append(success_message)
+            
+            # Add each place to the data array
+            for place in simplified_results:
+                structured_response["data"].append({
+                    "place": place
+                })
+        
+        # Return the structured response
+        return structured_response
         
     except Exception as e:
         logger.error(f"Error searching places: {str(e)}")

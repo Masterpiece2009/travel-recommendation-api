@@ -4526,10 +4526,10 @@ def simplify_roadmap_to_list(roadmap_data):
         roadmap_data: Original roadmap data
         
     Returns:
-        List of places with route information and warnings or positive message
+        Dictionary with warnings/message and list of places with route information
     """
     if not roadmap_data or "places" not in roadmap_data:
-        return []
+        return {"data": [], "message": None}
     
     places = roadmap_data.get("places", [])
     routes = roadmap_data.get("routes", [])
@@ -4541,31 +4541,31 @@ def simplify_roadmap_to_list(roadmap_data):
         if from_id:
             next_stops[from_id] = route
     
-    # Create the simplified list
-    simplified = []
+    # Create the simplified list for places only
+    simplified_places = []
     
     # Check if there are warnings
     has_warnings = "warnings" in roadmap_data and roadmap_data["warnings"] and len(roadmap_data["warnings"]) > 0
     
+    # Prepare message object
+    message = None
     if has_warnings:
-        # Add existing warnings
-        for warning in roadmap_data["warnings"]:
-            warning_entry = {
-                "type": "warning",
-                "warning_type": warning.get("type", "general"),
-                "message": warning.get("message", "Warning"),
-                "is_warning": True
-            }
-            simplified.append(warning_entry)
+        # Get the first warning as the main message
+        warning = roadmap_data["warnings"][0]
+        message = {
+            "type": "warning",
+            "warning_type": warning.get("type", "general"),
+            "message": warning.get("message", "Warning"),
+            "is_warning": True
+        }
     else:
         # Add a positive message when there are no warnings
-        positive_entry = {
+        message = {
             "type": "message",
             "message_type": "success",
             "message": "This roadmap matches your preferences perfectly!",
             "is_warning": False
         }
-        simplified.append(positive_entry)
     
     # Then add the place entries
     for place in places:
@@ -4609,9 +4609,13 @@ def simplify_roadmap_to_list(roadmap_data):
             "next_destination": next_route.get("to_name") if next_route else None
         }
         
-        simplified.append(entry)
+        simplified_places.append(entry)
     
-    return simplified
+    # Return a structured response with message and data
+    return {
+        "data": simplified_places,
+        "message": message
+    }
 
 async def get_roadmap_with_caching(user_id):
     """

@@ -5360,7 +5360,7 @@ async def get_user_shown_places(user_id: str):
 async def search_places(
     user_id: str,
     query: str = Query(..., min_length=1),
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(10, ge=1, le=50),
     translate_results: bool = Query(False, description="Whether to translate results back to the query language"),
     language: Optional[str] = Query(None, description="Override detected language")
 ):

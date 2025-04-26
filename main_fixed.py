@@ -825,6 +825,15 @@ except Exception as e:
     logger.error(f"❌ Error creating TTL index on recommendations_cache collection: {e}")
 
 try:
+    # Check if the index exists first
+    existing_indexes = list(shown_places_collection.list_indexes())
+    ttl_index_exists = any(idx.get('name') == 'last_updated_1' for idx in existing_indexes)
+    
+    # If the index exists with different options, drop it first
+    if ttl_index_exists:
+        shown_places_collection.drop_index('last_updated_1')
+        logger.info("Dropped existing TTL index on shown_places collection")
+    
     # Create new index on last_updated field
     shown_places_collection.create_index(
         [("last_updated", pymongo.ASCENDING)],  # Changed from "timestamp" to "last_updated"
@@ -833,7 +842,6 @@ try:
     logger.info("✅ Created TTL index on shown_places collection using last_updated field")
 except Exception as e:
     logger.error(f"❌ Error creating TTL index on shown_places collection: {e}")
-
 # TTL index for cache locks (expires after 10 minutes)
 try:
     cache_locks_collection.create_index(

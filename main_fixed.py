@@ -4550,14 +4550,30 @@ def simplify_roadmap_to_list(roadmap_data):
     # Prepare message object
     message = None
     if has_warnings:
-        # Get the first warning as the main message
-        warning = roadmap_data["warnings"][0]
-        message = {
-            "type": "warning",
-            "warning_type": warning.get("type", "general"),
-            "message": warning.get("message", "Warning"),
-            "is_warning": True
-        }
+        # Include all warnings in an array
+        warnings = roadmap_data["warnings"]
+        if len(warnings) == 1:
+            # If there's only one warning, use it directly
+            warning = warnings[0]
+            message = {
+                "type": "warning",
+                "warning_type": warning.get("type", "general"),
+                "message": warning.get("message", "Warning"),
+                "is_warning": True
+            }
+        else:
+            # If there are multiple warnings, include them all
+            message = {
+                "type": "warnings",
+                "warnings": [
+                    {
+                        "warning_type": w.get("type", "general"),
+                        "message": w.get("message", "Warning")
+                    } for w in warnings
+                ],
+                "message": f"There are {len(warnings)} warnings for this roadmap.",
+                "is_warning": True
+            }
     else:
         # Add a positive message when there are no warnings
         message = {
@@ -4615,9 +4631,7 @@ def simplify_roadmap_to_list(roadmap_data):
     return {
         "message": message,
         "data": simplified_places
-      
     }
-
 async def get_roadmap_with_caching(user_id):
     """
     Get a roadmap for a user with caching.

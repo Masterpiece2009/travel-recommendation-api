@@ -4613,8 +4613,9 @@ def simplify_roadmap_to_list(roadmap_data):
     
     # Return a structured response with message and data
     return {
-        "data": simplified_places,
-        "message": message
+        "message": message,
+        "data": simplified_places
+      
     }
 
 async def get_roadmap_with_caching(user_id):

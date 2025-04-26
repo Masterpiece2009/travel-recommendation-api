@@ -4577,6 +4577,7 @@ def simplify_roadmap_to_list(roadmap_data):
         
         # Create a simplified place object matching the document structure
         simplified_place = {
+            "place_id": place.get("_id"),
             "name": place.get("name"),
             "category": place.get("category"),
             "tags": place.get("tags", []),

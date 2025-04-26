@@ -5087,6 +5087,7 @@ async def get_recommendations(
                     average_rating = None
                 
             simplified_place = {
+                "place_id": place.get("_id"),
                 "name": place.get("name"),
                 "category": place.get("category"),
                 "tags": place.get("tags", []),

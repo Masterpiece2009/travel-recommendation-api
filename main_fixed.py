@@ -3603,7 +3603,7 @@ async def background_cache_recommendations(user_id, num_entries=6):
             logger.info(f"Released cache lock for user {user_id}")
         except Exception as lock_error:
             logger.error(f"Error releasing cache lock: {lock_error}")
-# --- PART 5: ROADMAP GENERATION ---
+# --- PART 5: ROADMAP GENERATION ---future enhancements
 
 def get_seasonal_activities(month=None):
     """

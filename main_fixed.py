@@ -4599,7 +4599,9 @@ def simplify_roadmap_to_list(roadmap_data):
             "description": place.get("description"),
             "location": {
                 "city": place.get("location", {}).get("city"),
-                "country": place.get("location", {}).get("country")
+                "country": place.get("location", {}).get("country"),
+                "latitude": place.get("location", {}).get("latitude"),
+                "longitude": place.get("location", {}).get("longitude")
             },
             "accessibility": place.get("accessibility", []),  # This is now a top-level field
             "average_rating": average_rating,  # Use the cleaned value

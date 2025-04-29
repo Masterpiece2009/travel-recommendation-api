@@ -5646,7 +5646,9 @@ async def search_places(
                 "description": place.get("description"),
                 "location": {
                     "city": place.get("location", {}).get("city"),
-                    "country": place.get("location", {}).get("country")
+                    "country": place.get("location", {}).get("country"),
+                    "latitude": place.get("location", {}).get("latitude"),
+                    "longitude": place.get("location", {}).get("longitude")
                 },
                 "accessibility": place.get("accessibility", []),
                 "average_rating": place.get("average_rating"),

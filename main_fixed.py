@@ -5112,7 +5112,9 @@ async def get_recommendations(
                 "description": place.get("description"),
                 "location": {
                     "city": place.get("location", {}).get("city"),
-                    "country": place.get("location", {}).get("country")
+                    "country": place.get("location", {}).get("country"),
+                    "latitude": place.get("location", {}).get("latitude"),  # <- Added longitude
+                    "longitude": place.get("location", {}).get("longitude")
                 },
                 "accessibility": place.get("accessibility", []),
                 "average_rating": average_rating,  # Use the cleaned value

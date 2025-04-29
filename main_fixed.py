@@ -5121,6 +5121,7 @@ async def get_recommendations(
                 "appropriate_time": place.get("appropriate_time", []),
                 "budget": place.get("budget"),
                 "group_type": place.get("group_type")
+                "image": place.get("image")
             }
             simplified_recommendations.append(simplified_place)
         

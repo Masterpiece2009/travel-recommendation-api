@@ -4182,7 +4182,7 @@ def generate_hybrid_roadmap(user_id):
                 except Exception as e:
                     logger.error(f"Error getting general trending places: {str(e)}")
         
-        # --- 2. PERSONALIZED MATCHES IN DESTINATIONS / GENERAL PERSONALIZED ---
+# --- 2. PERSONALIZED MATCHES IN DESTINATIONS / GENERAL PERSONALIZED ---
         personalized_category = "destination_personalized" if destinations and len(destinations) > 0 else "personalized"
         if category_counts.get(personalized_category, 0) > 0:
             count = category_counts[personalized_category]
@@ -4211,9 +4211,19 @@ def generate_hybrid_roadmap(user_id):
                 place_group_type = place.get("group_type", "")
                 
                 if group_type and place_group_type:
-                    if group_type.lower() == place_group_type.lower():
+                    # Handle case where place_group_type is a list
+                    if isinstance(place_group_type, list):
+                        # Convert list to string for comparison
+                        place_group_type_str = ", ".join(place_group_type)
+                    else:
+                        place_group_type_str = place_group_type
+                        
+                    # Ensure both are strings for comparison
+                    group_type_str = group_type if isinstance(group_type, str) else str(group_type)
+                    
+                    if group_type_str.lower() == place_group_type_str.lower():
                         group_score = 1.0  # Exact match
-                    elif group_type.lower() in place_group_type.lower() or place_group_type.lower() in group_type.lower():
+                    elif group_type_str.lower() in place_group_type_str.lower() or place_group_type_str.lower() in group_type_str.lower():
                         group_score = 0.8  # Partial match
                 
                 # 4. Seasonal score (20%)

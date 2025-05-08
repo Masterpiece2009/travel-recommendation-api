@@ -215,4 +215,3 @@ This system empowers developers and businesses to build engaging, user-centric t
 
 ---
 
-If you'd like me to prepare this as a downloadable Word document or in another format, just let me know!

@@ -992,13 +992,22 @@ def get_user_travel_preferences(user_id):
     if not travel_prefs:
         logger.warning(f"No travel preferences found for user {user_id}")
         return None
+    
+    # Get the group_type value and ensure it's a string
+    group_type = travel_prefs.get("group_type", "")
+    if isinstance(group_type, list):
+        # If it's a list, join it into a single string
+        group_type = ", ".join(str(item) for item in group_type)
+    elif not isinstance(group_type, str):
+        # If it's any other non-string type, convert to string
+        group_type = str(group_type)
         
     return {
         "destinations": travel_prefs.get("destinations", []),
         "travel_dates": travel_prefs.get("travel_dates", ""),
         "accessibility_needs": travel_prefs.get("accessibility_needs", []),
         "budget": travel_prefs.get("budget", "medium"),  # Default to 'medium' if missing
-        "group_type": travel_prefs.get("group_type", "")  # Added group_type
+        "group_type": group_type  # Now guaranteed to be a string
     }
 
 def compute_text_similarity(text1, text2):
